@@ -21,10 +21,16 @@ export async function readLocal(
 export async function writeLocal(user: string, value: LocalWorkspace) {
   await (await database()).put("workspaces", sanitizeWorkspace(value), user);
 }
+// Delete only this immutable account ID's offline workspace.
+export async function clearLocal(user: string) {
+  await (await database()).delete("workspaces", user);
+}
 // Enforce privacy at the storage boundary, including for administrator judges.
 export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
   const cached = structuredClone(value);
   const snapshot = cached.snapshot;
+  // Signed avatar URLs are short-lived bearer links and must not persist in IndexedDB.
+  delete snapshot.profile.avatar_url;
   snapshot.protected = false;
   snapshot.submissions = snapshot.submissions
     .filter((s) => s.user_id === snapshot.profile.id)

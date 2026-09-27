@@ -24,6 +24,9 @@ import {
   X,
   Pencil,
   PanelLeft,
+  UserRound,
+  Camera,
+  Trash2,
 } from "lucide-react";
 import {
   canManage,
@@ -32,7 +35,7 @@ import {
   isAdministrator,
 } from "@/lib/access";
 import { api, demo, supabase } from "@/lib/supabase";
-import { applyLocal, LocalWorkspace, readLocal, writeLocal } from "@/lib/local";
+import { applyLocal, clearLocal, LocalWorkspace, readLocal, writeLocal } from "@/lib/local";
 import {
   categories,
   Competitor,
@@ -118,7 +121,17 @@ export default function Page() {
     [technicalViewSlot, setTechnicalViewSlot] = useState(1),
     [performanceViewSlot, setPerformanceViewSlot] = useState(4),
     [selected, setSelected] = useState<string | null>(null),
-    [theme, setTheme] = useState("dark");
+    [theme, setTheme] = useState("light");
+  const [themePreference, setThemePreference] = useState<"system" | "light" | "dark">("light");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [profileName, setProfileName] = useState("");
+  const [profileUsername, setProfileUsername] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newLoginPassword, setNewLoginPassword] = useState("");
+  const [confirmLoginPassword, setConfirmLoginPassword] = useState("");
+  const [profileMessage, setProfileMessage] = useState("");
+  const [profileMessageError, setProfileMessageError] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
   const [newDivision, setNewDivision] = useState("");
   const [trick, setTrick] = useState(""),
     [level, setLevel] = useState(1),
@@ -135,6 +148,13 @@ export default function Page() {
   const [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
     [loginBusy, setLoginBusy] = useState(false),
+    [adminPassword, setAdminPassword] = useState(""),
+    [adminPasswordError, setAdminPasswordError] = useState(""),
+    [adminPasswordBusy, setAdminPasswordBusy] = useState(false),
+    [adminUnlocked, setAdminUnlocked] = useState(false),
+    [newAdminTabPassword, setNewAdminTabPassword] = useState(""),
+    [confirmAdminTabPassword, setConfirmAdminTabPassword] = useState(""),
+    [adminTabPasswordMessage, setAdminTabPasswordMessage] = useState(""),
     [filter, setFilter] = useState("All divisions"),
     [competitorEdit, setCompetitorEdit] = useState<Partial<Competitor> | null>(
       null,
@@ -187,6 +207,15 @@ export default function Page() {
       ...(state?.competitors.map((c) => c.division) ?? []),
     ]),
   );
+  const changeThemePreference = (preference: "system" | "light" | "dark") => {
+    setThemePreference(preference);
+    localStorage.setItem("hidc-theme", preference);
+    const effective = preference === "system"
+      ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+      : preference;
+    setTheme(effective);
+    document.documentElement.dataset.theme = effective;
+  };
   const commit = useCallback(async (next: LocalWorkspace) => {
     if (demo) {
       next = {
@@ -264,9 +293,18 @@ export default function Page() {
     }
   }, [commit]);
   useEffect(() => {
-    const savedTheme = localStorage.getItem("hidc-theme") ?? "dark";
-    setTheme(savedTheme);
-    document.documentElement.dataset.theme = savedTheme;
+    // Light is the event-wide default; dark mode is an explicit console choice.
+    const savedTheme = localStorage.getItem("hidc-theme");
+    const preference = savedTheme === "dark" || savedTheme === "system" ? savedTheme : "light";
+    setThemePreference(preference);
+    const applyPreference = () => {
+      const effective = preference === "system"
+        ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : preference;
+      setTheme(effective);
+      document.documentElement.dataset.theme = effective;
+    };
+    applyPreference();
     try {
       const k = localStorage.getItem("hidc-hotkeys");
       if (k) setHotkeys({ ...defaultKeys, ...JSON.parse(k) });
@@ -337,6 +375,18 @@ export default function Page() {
       window.removeEventListener("offline", connectivity);
     };
   }, [commit]);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      if (themePreference !== "system") return;
+      const effective = media.matches ? "dark" : "light";
+      setTheme(effective);
+      document.documentElement.dataset.theme = effective;
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [themePreference]);
   useEffect(() => {
     if (!ready || !state) return;
     const timer = setInterval(() => {
@@ -527,6 +577,188 @@ export default function Page() {
       setLoginBusy(false);
     }
   }
+  function openProfileSettings() {
+    setProfileName(profile?.name ?? "");
+    setProfileUsername(profile?.username ?? "");
+    setCurrentPassword("");
+    setNewLoginPassword("");
+    setConfirmLoginPassword("");
+    setProfileMessage("");
+    setProfileMessageError(false);
+    setSettingsOpen(true);
+  }
+  async function saveProfileSettings(e: React.FormEvent) {
+    e.preventDefault();
+    if (!profile || !workspace) return;
+    setProfileMessage("");
+    setProfileMessageError(false);
+    const usernameChanged = profileUsername.trim().toLowerCase() !== profile.username;
+    if (
+      (newLoginPassword || confirmLoginPassword) &&
+      newLoginPassword !== confirmLoginPassword
+    ) {
+      setProfileMessage("The new passwords do not match.");
+      setProfileMessageError(true);
+      return;
+    }
+    if (!demo && !online) {
+      setProfileMessage("Connect to the server before changing profile details.");
+      setProfileMessageError(true);
+      return;
+    }
+    if (demo && (usernameChanged || newLoginPassword)) {
+      setProfileMessage("Login credentials can only be changed on the connected site.");
+      setProfileMessageError(true);
+      return;
+    }
+    const protectedChange = usernameChanged || !!newLoginPassword;
+    if (!demo && protectedChange && !currentPassword) {
+      setProfileMessage("Enter your current password to change your username or password.");
+      setProfileMessageError(true);
+      return;
+    }
+    setProfileBusy(true);
+    try {
+      if (demo) {
+        const next = structuredClone(ref.current!);
+        next.snapshot.profile.name = profileName.trim();
+        await commit(next);
+      } else {
+        const payload: Record<string, string> = {
+          name: profileName,
+          username: profileUsername,
+        };
+        if (protectedChange) payload.currentPassword = currentPassword;
+        if (newLoginPassword) payload.newPassword = newLoginPassword;
+        await api("profile", payload);
+        const snapshot: Snapshot = await api("state");
+        await commit({ snapshot, queue: ref.current?.queue ?? [] });
+      }
+      setCurrentPassword("");
+      setNewLoginPassword("");
+      setConfirmLoginPassword("");
+      setProfileMessage("Your profile was updated.");
+      setNotice("Profile updated");
+    } catch (e) {
+      setProfileMessage((e as Error).message);
+      setProfileMessageError(true);
+    } finally {
+      setProfileBusy(false);
+    }
+  }
+  async function changeAvatar(file?: File) {
+    if (!profile || !file) return;
+    setProfileMessage("");
+    setProfileMessageError(false);
+    if (!online || demo) {
+      setProfileMessage("Avatar changes require an online account on the connected site.");
+      setProfileMessageError(true);
+      return;
+    }
+    if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type)) {
+      setProfileMessage("Choose a JPEG, PNG, or WebP image.");
+      setProfileMessageError(true);
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setProfileMessage("The image must be no larger than 2 MB.");
+      setProfileMessageError(true);
+      return;
+    }
+    setProfileBusy(true);
+    try {
+      const session = await supabase?.auth.getSession();
+      const body = new FormData();
+      body.set("avatar", file);
+      const response = await fetch("/api/profile/avatar", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session?.data.session?.access_token ?? ""}` },
+        body,
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Avatar upload failed.");
+      const snapshot: Snapshot = await api("state");
+      await commit({ snapshot, queue: ref.current?.queue ?? [] });
+      setProfileMessage("Profile picture updated.");
+      setNotice("Profile picture updated");
+    } catch (e) {
+      setProfileMessage((e as Error).message);
+      setProfileMessageError(true);
+    } finally {
+      setProfileBusy(false);
+    }
+  }
+  async function removeAvatar() {
+    if (!profile || !online || demo) return;
+    setProfileBusy(true);
+    try {
+      const session = await supabase?.auth.getSession();
+      const response = await fetch("/api/profile/avatar", {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${session?.data.session?.access_token ?? ""}` },
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Could not remove picture.");
+      const snapshot: Snapshot = await api("state");
+      await commit({ snapshot, queue: ref.current?.queue ?? [] });
+      setProfileMessage("Profile picture removed.");
+      setNotice("Profile picture removed");
+    } catch (e) {
+      setProfileMessage((e as Error).message);
+      setProfileMessageError(true);
+    } finally {
+      setProfileBusy(false);
+    }
+  }
+  async function signOut() {
+    if (workspace?.queue.length) {
+      setSyncError("Sync pending changes before signing out.");
+      return;
+    }
+    localStorage.removeItem("hidc-last-user");
+    await supabase?.auth.signOut();
+    ref.current = null;
+    setWorkspace(null);
+    setSettingsOpen(false);
+  }
+  async function clearOwnOfflineCache() {
+    if (!profile || !workspace || workspace.queue.length) return;
+    await clearLocal(profile.id);
+    await signOut();
+    setNotice("Your offline cache was cleared.");
+  }
+  async function verifyAdminPassword(e: React.FormEvent) {
+    e.preventDefault();
+    setAdminPasswordBusy(true);
+    setAdminPasswordError("");
+    try {
+      await api("verify-admin", { password: adminPassword });
+      setAdminUnlocked(true);
+      setAdminPassword("");
+    } catch (e) {
+      setAdminPasswordError((e as Error).message);
+    } finally {
+      setAdminPasswordBusy(false);
+    }
+  }
+  async function changeAdminTabPassword(e: React.FormEvent) {
+    e.preventDefault();
+    setAdminTabPasswordMessage("");
+    if (newAdminTabPassword !== confirmAdminTabPassword) {
+      setAdminTabPasswordMessage("The new passwords do not match.");
+      return;
+    }
+    try {
+      if (demo)
+        throw new Error("Changing the shared password requires the live site.");
+      await api("admin-tab-password", { password: newAdminTabPassword });
+      setNewAdminTabPassword("");
+      setConfirmAdminTabPassword("");
+      setAdminTabPasswordMessage("Shared Admin-tab password updated.");
+    } catch (e) {
+      setAdminTabPasswordMessage((e as Error).message);
+    }
+  }
   async function manage(action: string, data: unknown) {
     try {
       if (demo) {
@@ -626,7 +858,7 @@ export default function Page() {
     );
   if (!state)
     return (
-      <main className="login">
+      <main className="login" data-theme="light">
         <div className="login-card">
           <div className="brand">
             <img
@@ -694,9 +926,7 @@ export default function Page() {
           title="Toggle light / dark theme"
           onClick={() => {
             const next = theme === "dark" ? "light" : "dark";
-            setTheme(next);
-            document.documentElement.dataset.theme = next;
-            localStorage.setItem("hidc-theme", next);
+            changeThemePreference(next);
           }}
         >
           <img
@@ -729,7 +959,20 @@ export default function Page() {
                     ? `${workspace.queue.length} pending`
                     : "Connected"}
           </span>
-          <div className="avatar">{organizer ? "SA" : `J${profile?.slot}`}</div>
+          <button
+            className="profile-trigger"
+            aria-label="Open profile and settings"
+            title="Profile and settings"
+            onClick={openProfileSettings}
+          >
+            <span className="avatar">
+              {profile?.avatar_url ? (
+                <img src={profile.avatar_url} alt="" />
+              ) : (
+                (profile?.name ?? "?").trim().split(/\s+/).slice(0, 2).map((n) => n[0]?.toUpperCase()).join("")
+              )}
+            </span>
+          </button>
           <div className="identity">
             <b>{profile?.name}</b>
             <span>
@@ -741,16 +984,7 @@ export default function Page() {
           <button
             className="icon"
             title="Sign out"
-            onClick={() => {
-              if (workspace.queue.length) {
-                setSyncError("Sync pending changes before signing out.");
-                return;
-              }
-              localStorage.removeItem("hidc-last-user");
-              void supabase?.auth.signOut();
-              ref.current = null;
-              setWorkspace(null);
-            }}
+            onClick={() => void signOut()}
           >
             <LogOut size={17} />
           </button>
@@ -762,6 +996,11 @@ export default function Page() {
             key={name}
             className={tab === name ? "active" : ""}
             onClick={() => {
+              if (name !== "Admin") setAdminUnlocked(false);
+              if (name === "Admin") {
+                setAdminUnlocked(false);
+                setAdminPasswordError("");
+              }
               setTab(name);
               setSelected(null);
               clear();
@@ -1112,6 +1351,7 @@ export default function Page() {
                         <button
                           key={d}
                           disabled={!canScore}
+                          aria-pressed={trick === d}
                           className={trick === d ? "selected" : ""}
                           onClick={() => setTrick(d)}
                         >
@@ -1647,9 +1887,47 @@ export default function Page() {
           </section>
         )}
         {tab === "Admin" && (
+          !adminUnlocked ? (
+            <section className="panel admin-password-panel">
+              <div className="panel-heading">
+                <h3>Admin access</h3>
+              </div>
+              <p>Enter the admin password to view score values.</p>
+              <form onSubmit={verifyAdminPassword}>
+                <label>
+                  Admin password
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    required
+                    value={adminPassword}
+                    onChange={(e) => setAdminPassword(e.target.value)}
+                  />
+                </label>
+                {adminPasswordError && (
+                  <p className="error" role="alert">
+                    {adminPasswordError}
+                  </p>
+                )}
+                <button className="primary" disabled={adminPasswordBusy}>
+                  {adminPasswordBusy ? "Checking…" : "Unlock admin tab"}
+                  <ArrowRight size={16} />
+                </button>
+              </form>
+            </section>
+          ) : (
           <section className="panel records">
             <div className="panel-heading">
               <h3>Your score values</h3>
+              <button
+                onClick={() => {
+                  setAdminUnlocked(false);
+                  setAdminPassword("");
+                  setAdminPasswordError("");
+                }}
+              >
+                <Lock size={14} /> Lock Admin tab
+              </button>
             </div>
             {exports((format, ranked) => {
               const ordered = [...personalSubmissions].sort((a, b) =>
@@ -1699,6 +1977,7 @@ export default function Page() {
               <div className="empty-state">No scores yet.</div>
             )}
           </section>
+          )
         )}
         {tab === "Server Access Control" && server && (
           <div className="organizer">
@@ -1853,7 +2132,9 @@ export default function Page() {
                   );
                   return (
                     <div key={slot}>
-                      <div className="avatar">J{slot}</div>
+                      <div className="avatar">
+                        {p?.avatar_url ? <img src={p.avatar_url} alt={`${p.name} profile`} /> : p ? p.name.trim().split(/\s+/).slice(0, 2).map((n) => n[0]?.toUpperCase()).join("") : `J${slot}`}
+                      </div>
                       <h3>
                         {slot < 4 ? "Technical" : "Performance"} {slot}
                       </h3>
@@ -1861,6 +2142,7 @@ export default function Page() {
                         {p?.name ?? "Unassigned"}
                         {p && !canEditJudge(p) ? " · Administrator" : ""}
                       </p>
+                      {p && <small className="judge-profile-meta">@{p.username} · Judge {p.slot} · {p.active ? "Active" : "Inactive"} · {isAdministrator(p) ? "Administrator" : "Judge"}</small>}
                       <button
                         disabled={!!p && !canEditJudge(p)}
                         onClick={() =>
@@ -1895,7 +2177,8 @@ export default function Page() {
                 ?.filter((p) => !p.active && canEditJudge(p))
                 .map((p) => (
                   <div className="detail-event" key={p.id}>
-                    {p.name} · Inactive
+                    {p.avatar_url ? <img className="admin-roster-avatar" src={p.avatar_url} alt={`${p.name} profile`} /> : null}
+                    {p.name} · @{p.username} · Judge {p.slot} · Inactive
                     <button
                       onClick={() =>
                         setUserEdit({
@@ -1909,6 +2192,55 @@ export default function Page() {
                     </button>
                   </div>
                 ))}
+            </section>
+            <section className="panel records admin-tab-password-panel">
+              <div className="panel-heading">
+                <h3>
+                  <Shield size={17} /> Shared Admin-tab password
+                </h3>
+                <span className="pill">Administrators only</span>
+              </div>
+              <p>
+                Change the shared password everyone must enter to open the
+                Admin tab, including administrators.
+              </p>
+              <form
+                className="admin-tab-password-form"
+                onSubmit={changeAdminTabPassword}
+              >
+                <label>
+                  New shared password
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={6}
+                    maxLength={256}
+                    required
+                    value={newAdminTabPassword}
+                    onChange={(e) => setNewAdminTabPassword(e.target.value)}
+                  />
+                </label>
+                <label>
+                  Confirm new password
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={6}
+                    maxLength={256}
+                    required
+                    value={confirmAdminTabPassword}
+                    onChange={(e) => setConfirmAdminTabPassword(e.target.value)}
+                  />
+                </label>
+                {adminTabPasswordMessage && (
+                  <p className="admin-tab-password-message muted" role="status">
+                    {adminTabPasswordMessage}
+                  </p>
+                )}
+                <button className="primary">
+                  Update shared password <ArrowRight size={16} />
+                </button>
+              </form>
             </section>
             <section className="panel">
               <div className="panel-heading">
@@ -2068,6 +2400,114 @@ export default function Page() {
           <span>·</span> {online ? "Online" : "Offline"}
         </span>
       </footer>
+      {settingsOpen && profile && (
+        <Dialog title="Profile & settings" close={() => setSettingsOpen(false)}>
+          <div className="profile-avatar-control">
+            <span className="avatar profile-avatar-large">
+              {profile.avatar_url ? (
+                <img src={profile.avatar_url} alt={`${profile.name} profile`} />
+              ) : (
+                profile.name.trim().split(/\s+/).slice(0, 2).map((n) => n[0]?.toUpperCase()).join("")
+              )}
+            </span>
+            <div>
+              <b>Profile picture</b>
+              <p>JPEG, PNG, or WebP · up to 2 MB</p>
+            </div>
+            <label className="button-like">
+              <Camera size={15} /> Replace
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                disabled={profileBusy || !online || demo}
+                onChange={(e) => {
+                  const file = e.currentTarget.files?.[0];
+                  e.currentTarget.value = "";
+                  if (file) void changeAvatar(file);
+                }}
+              />
+            </label>
+            {profile.avatar_url && (
+              <button type="button" disabled={profileBusy || !online || demo} onClick={() => void removeAvatar()}>
+                <Trash2 size={15} /> Remove
+              </button>
+            )}
+          </div>
+          {demo && <p className="info-note">Demo mode: account changes and profile pictures are not saved to a live account.</p>}
+          <form className="profile-settings-form" onSubmit={saveProfileSettings}>
+            <label>
+              Display name
+              <input required maxLength={100} value={profileName} onChange={(e) => setProfileName(e.target.value)} />
+            </label>
+            <label>
+              Username
+              <input
+                required minLength={3} maxLength={32}
+                pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}"
+                autoComplete="username"
+                value={profileUsername}
+                onChange={(e) => setProfileUsername(e.target.value)}
+              />
+            </label>
+            <p className="profile-help">Your username is used to sign in. It must be unique.</p>
+            <label>
+              Current password <span className="muted">(required for username or password changes)</span>
+              <input type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+            </label>
+            <label>
+              New password <span className="muted">(optional · minimum 6 characters)</span>
+              <input type="password" minLength={6} maxLength={256} autoComplete="new-password" value={newLoginPassword} onChange={(e) => setNewLoginPassword(e.target.value)} />
+            </label>
+            <label>
+              Confirm new password
+              <input type="password" minLength={6} maxLength={256} autoComplete="new-password" value={confirmLoginPassword} onChange={(e) => setConfirmLoginPassword(e.target.value)} />
+            </label>
+            <p className="password-privacy-notice">Use a password only for this scoring system. Event organizers can reset account access; do not reuse a personal password.</p>
+            <div className="profile-settings-actions">
+              <button className="primary" disabled={profileBusy || (!online && !demo)}>
+                {profileBusy ? "Saving…" : "Save profile"}
+              </button>
+            </div>
+          </form>
+          <div className="profile-local-settings">
+            <label>
+              Theme preference
+              <select value={themePreference} onChange={(e) => changeThemePreference(e.target.value as "system" | "light" | "dark")}>
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+            <div className="profile-setting-row">
+              <div><b>Hotkeys</b><span>Configure your local keyboard shortcuts.</span></div>
+              <button type="button" onClick={() => { setSettingsOpen(false); setKeysOpen(true); }}>Configure</button>
+            </div>
+            <div className="profile-setting-row">
+              <div><b>Offline cache</b><span>Clears only this account’s saved workspace on this browser.</span></div>
+              <button
+                type="button"
+                disabled={!!workspace?.queue.length}
+                onClick={() => {
+                  setSettingsOpen(false);
+                  setModal({
+                    title: "Clear your offline cache?",
+                    body: workspace?.queue.length
+                      ? "Sync pending score changes first."
+                      : "This removes only your local workspace from this browser and signs you out. It does not delete online profiles or scoring records.",
+                    action: () => void clearOwnOfflineCache(),
+                  });
+                }}
+              >Clear cache</button>
+            </div>
+            {workspace?.queue.length ? <p className="profile-help">Sync {workspace.queue.length} pending score change(s) before clearing your cache or signing out.</p> : null}
+          </div>
+          <div className="profile-dialog-footer">
+            <button type="button" onClick={() => void signOut()}><LogOut size={15} /> Sign out</button>
+          </div>
+          {profileMessage && <p className={profileMessageError ? "error" : "success"} role="status">{profileMessage}</p>}
+          {!online && !demo && <p className="profile-help">Profile, username, password, and picture changes require an online connection. Theme and hotkeys remain available offline.</p>}
+        </Dialog>
+      )}
       {notice && (
         <div className="toast" role="status">
           <CheckCircle2 size={18} />

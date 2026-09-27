@@ -5,6 +5,8 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import ts from "typescript";
 import * as access from "../lib/access";
+import { sanitizeAuditRows } from "../lib/audit";
+import { hashAdminTabPassword } from "../lib/admin-password";
 import {
   sanitizeWorkspace,
   applyLocal,
@@ -101,6 +103,94 @@ test("administrator identity and judge scoring remain independent, including leg
   }
   assert.equal(access.canManage({ ...alex, is_admin: undefined }), false);
   assert.equal(access.canManage({ ...alex, active: false }), false);
+});
+
+test("Admin score-view password is checked server-side for every signed-in account", async () => {
+  const previous = process.env.ADMIN_VIEW_PASSWORD;
+  process.env.ADMIN_VIEW_PASSWORD = "ndladm";
+  try {
+    for (const profile of [...judges, alex, organizer]) {
+      const query: any = {
+        select: () => query,
+        eq: () => query,
+        order: () => query,
+        limit: () => query,
+        maybeSingle: async () => ({ data: null, error: null }),
+      };
+      const handlers = route("verify-admin", profile, {
+        from: () => query,
+      });
+      assert.equal(
+        (await handlers.POST(request({ password: "wrong" }))).status,
+        401,
+      );
+      assert.equal(
+        (await handlers.POST(request({ password: "ndladm" }))).status,
+        200,
+      );
+    }
+    const hashed = hashAdminTabPassword("changed-shared-password");
+    const query: any = {
+      select: () => query,
+      eq: () => query,
+      order: () => query,
+      limit: () => query,
+      maybeSingle: async () => ({
+        data: { next: { password_hash: hashed } },
+        error: null,
+      }),
+    };
+    const verify = route("verify-admin", judges[0], {
+      from: () => query,
+    }).POST;
+    assert.equal(
+      (await verify(request({ password: "ndladm" }))).status,
+      401,
+    );
+    assert.equal(
+      (await verify(request({ password: "changed-shared-password" }))).status,
+      200,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ADMIN_VIEW_PASSWORD;
+    else process.env.ADMIN_VIEW_PASSWORD = previous;
+  }
+});
+
+test("only administrators can change the shared Admin-tab password", async () => {
+  for (const actor of [alex, organizer]) {
+    let saved: any;
+    const response = await route("admin-tab-password", actor, {
+      from: () => ({
+        insert: async (row: unknown) => {
+          saved = row;
+          return { error: null };
+        },
+      }),
+    }).POST(request({ password: "changed-shared-password" }));
+    assert.equal(response.status, 200);
+    assert.equal(saved.user_id, actor.id);
+    assert.equal(saved.action, "admin_tab_password_change");
+    assert.notEqual(saved.next.password_hash, "changed-shared-password");
+  }
+  const blocked = await route("admin-tab-password", judges[0], {}).POST(
+    request({ password: "changed-shared-password" }),
+  );
+  assert.equal(blocked.status, 400);
+});
+
+test("admin password hashes are omitted from audit responses", () => {
+  const rows = sanitizeAuditRows([
+    {
+      id: 1,
+      action: "admin_tab_password_change",
+      prior: null,
+      next: { password_hash: "private-hash" },
+    },
+    { id: 2, action: "division_create", prior: null, next: { name: "Open" } },
+  ]);
+  assert.deepEqual(rows[0].next, { password_changed: true });
+  assert.deepEqual(rows[1].next, { name: "Open" });
 });
 
 test("management, review, and audit reject judges 2–5 before database access", async () => {
@@ -302,7 +392,10 @@ test("state endpoint returns only own numeric scores to judges and global data o
             : table === "submissions"
               ? [...submissions]
               : table === "profiles"
-                ? profiles
+                ? profiles.map((row) => ({
+                    ...row,
+                    avatar_path: `${row.id}/private-avatar.png`,
+                  }))
                 : table === "audit"
                   ? [{ action: "test" }]
                   : [{ name: "Individual Open" }];
@@ -318,6 +411,14 @@ test("state endpoint returns only own numeric scores to judges and global data o
             Promise.resolve({ data }).then(done),
         };
         return builder;
+      },
+      storage: {
+        from: () => ({
+          createSignedUrl: async (path: string) => ({
+            data: { signedUrl: `https://signed.invalid/${path}` },
+            error: null,
+          }),
+        }),
       },
     };
     const response = await route("state", p, client).GET(
@@ -335,6 +436,13 @@ test("state endpoint returns only own numeric scores to judges and global data o
       assert.equal(body.rankings.length, 1);
       assert.equal(body.audit.length, 1);
       assert.equal(body.profiles.length, 6);
+      for (const metadata of body.profiles) {
+        assert.equal(metadata.avatar_path, undefined);
+        assert.equal(metadata.email, undefined);
+        assert.equal(metadata.password, undefined);
+        assert.equal(metadata.password_hash, undefined);
+        assert.match(metadata.avatar_url, /^https:\/\/signed\.invalid\//);
+      }
     } else {
       assert.equal(body.protected, false);
       assert.equal(body.submissions.length, 1);
@@ -344,6 +452,9 @@ test("state endpoint returns only own numeric scores to judges and global data o
       assert.equal(body.rankings, undefined);
       assert.equal(body.audit, undefined);
       assert.equal(body.profiles, undefined);
+      assert.equal(body.profile.avatar_path, undefined);
+      assert.equal(body.profile.password, undefined);
+      assert.equal(body.profile.password_hash, undefined);
     }
   }
 });
@@ -509,7 +620,7 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
   };
   const workspace: LocalWorkspace = {
     snapshot: {
-      profile: alex,
+      profile: { ...alex, avatar_url: "https://signed.invalid/temporary" },
       competitors: [],
       submissions: [
         own,
@@ -542,6 +653,7 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
   assert.deepEqual(cached.queue, workspace.queue);
   assert.equal(cached.snapshot.profile.id, alex.id);
   assert.equal(cached.snapshot.profile.slot, 1);
+  assert.equal(cached.snapshot.profile.avatar_url, undefined);
   assert.equal(workspace.snapshot.submissions[0].total, 6);
   assert.equal(
     applyLocal(cached.snapshot, cached.queue[0]).submissions[0].finished,

@@ -2,6 +2,7 @@ import { identity, failure } from "@/lib/server";
 import { eventScore, rankGlobal, total } from "@/lib/scoring";
 import { Submission } from "@/lib/model";
 import { canManage } from "@/lib/access";
+import { sanitizeAuditRows } from "@/lib/audit";
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   try {
@@ -41,9 +42,10 @@ export async function GET(req: Request) {
       });
     }
     const divisionRows = await client.from("divisions").select("name");
+    const ownProfile = await withAvatar(client, profile);
     const result: Record<string, unknown> = {
       divisions: divisionRows.data?.map((d) => d.name),
-      profile,
+      profile: ownProfile,
       competitors,
       protected: fullAccess,
       personal,
@@ -59,20 +61,39 @@ export async function GET(req: Request) {
         .select("*")
         .order("id", { ascending: false })
         .limit(250);
-      result.audit = audit;
+      result.audit = sanitizeAuditRows(audit ?? []);
     }
     if (fullAccess) {
       result.rankings = rankGlobal(competitors!, submissions);
-      const profiles = (
-        await client
+      let roster: any = await client
+        .from("profiles")
+        .select("id,name,username,role,slot,active,is_admin,avatar_path")
+        .order("slot");
+      // Keep the app usable against deployments until migration 005 is applied.
+      if (roster.error?.code === "42703")
+        roster = await client
           .from("profiles")
           .select("id,name,username,role,slot,active,is_admin")
-          .order("slot")
-      ).data;
-      result.profiles = profiles;
+          .order("slot");
+      if (roster.error) throw roster.error;
+      const profiles = roster.data;
+      result.profiles = await Promise.all(
+        (profiles ?? []).map((item: Record<string, any>) => withAvatar(client, item)),
+      );
     }
     return Response.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     return failure(e);
   }
+}
+
+async function withAvatar(client: any, value: Record<string, any>) {
+  const { avatar_path: path, ...safe } = value;
+  const avatar = path
+    ? await client.storage
+        .from("profile-avatars")
+        .createSignedUrl(path, 60 * 60)
+    : null;
+  if (avatar?.error) throw avatar.error;
+  return { ...safe, avatar_url: avatar?.data?.signedUrl ?? null };
 }

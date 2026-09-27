@@ -43,6 +43,8 @@ export type Profile = {
   slot: number | null;
   active: boolean;
   username?: string;
+  // Time-limited URL generated from a private storage object by /api/state.
+  avatar_url?: string | null;
   // Optional for pre-migration offline workspaces; missing means no added privilege.
   is_admin?: boolean;
 };

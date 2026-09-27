@@ -9,6 +9,7 @@ const allowedAppKeys = [
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "NEXT_PUBLIC_BYPASS_AUTH",
+  "ADMIN_VIEW_PASSWORD",
 ];
 const liveProjectRef = "msmdzuprjankfsgdozed";
 const errors = [];

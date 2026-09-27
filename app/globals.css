@@ -1,23 +1,5 @@
 @import "tailwindcss";
 :root {
-  --bg: #0d131c;
-  --panel: #141d29;
-  --panel2: #192432;
-  --border: #273342;
-  --text: #eef3f7;
-  --muted: #91a1b4;
-  --teal: #67dece;
-  --teal-bg: #163f3d;
-  --action-bg: #67dece;
-  --action-border: #67dece;
-  --action-text: #092b2a;
-  --action-hover: #8beadd;
-  --action-hover-border: #8beadd;
-  --danger: #ee9b9e;
-  --danger-bg: #36232c;
-  color-scheme: dark;
-}
-:root[data-theme="light"] {
   --bg: #f0f4f7;
   --panel: #fff;
   --panel2: #f3f6fa;
@@ -33,7 +15,29 @@
   --action-hover-border: #439e8c;
   --danger: #a32e42;
   --danger-bg: #fff0f2;
+  --field-bg: #ffffff;
+  --field-border: #c8d4df;
   color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #000000;
+  --panel: #141d29;
+  --panel2: #192432;
+  --border: #273342;
+  --text: #eef3f7;
+  --muted: #91a1b4;
+  --teal: #67dece;
+  --teal-bg: #163f3d;
+  --action-bg: #67dece;
+  --action-border: #67dece;
+  --action-text: #092b2a;
+  --action-hover: #8beadd;
+  --action-hover-border: #8beadd;
+  --danger: #ee9b9e;
+  --danger-bg: #36232c;
+  --field-bg: #243142;
+  --field-border: #46576b;
+  color-scheme: dark;
 }
 * {
   box-sizing: border-box;
@@ -907,9 +911,9 @@ td button {
 }
 select,
 input {
-  border: 1px solid var(--border);
+  border: 1px solid var(--field-border);
   border-radius: 6px;
-  background: var(--bg);
+  background: var(--field-bg);
   color: var(--text);
   padding: 10px 12px;
   max-width: 100%;
@@ -1198,15 +1202,32 @@ select {
   min-height: 100vh;
   display: grid;
   place-items: center;
-  background: radial-gradient(ellipse at 50% 10%, #153b43 0, transparent 65%);
+  padding: 28px;
+  background-color: #e9f2fa;
+  background-image: url("/login-background.png");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
 }
 .login-card {
   width: 460px;
   max-width: calc(100vw - 40px);
   padding: 42px;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  color: #192a3a;
+  background: rgb(255 255 255 / 91%);
+  border: 1px solid rgb(255 255 255 / 75%);
   border-radius: 16px;
+  box-shadow: 0 18px 60px rgb(43 73 111 / 22%);
+}
+.login-card input {
+  width: 100%;
+  color-scheme: light;
+  color: #192a3a;
+  background: #fff;
+  border-color: #b8c8d8;
+}
+.login-card input:focus-visible {
+  outline-color: #0b7167;
 }
 .login .eyebrow {
   font-size: 10px;
@@ -1242,6 +1263,80 @@ select {
 .error {
   color: var(--danger);
   margin-top: 15px;
+}
+.admin-password-panel {
+  width: min(480px, calc(100% - 32px));
+  margin: 40px auto;
+  padding: 24px;
+}
+.admin-password-panel > p {
+  color: var(--muted);
+}
+.admin-password-panel form {
+  display: grid;
+  gap: 12px;
+}
+.admin-password-panel label {
+  display: grid;
+  gap: 7px;
+}
+.admin-password-panel input {
+  width: 100%;
+}
+.admin-password-panel .primary {
+  justify-content: space-between;
+}
+.admin-tab-password-panel > p {
+  max-width: 680px;
+  margin-left: auto;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.admin-tab-password-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(220px, auto);
+  grid-template-areas: "password confirm submit" "status status status";
+  align-items: end;
+  gap: 16px;
+  max-width: 820px;
+  margin: 20px auto 0;
+}
+.admin-tab-password-form label:first-of-type {
+  grid-area: password;
+}
+.admin-tab-password-form label:nth-of-type(2) {
+  grid-area: confirm;
+}
+.admin-tab-password-form label {
+  display: grid;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.admin-tab-password-form input {
+  width: 100%;
+  min-height: 44px;
+}
+.admin-tab-password-form .admin-tab-password-message {
+  grid-area: status;
+  margin: 0;
+}
+.admin-tab-password-form button {
+  grid-area: submit;
+  align-self: end;
+  min-width: 220px;
+}
+@media (max-width: 900px) {
+  .admin-tab-password-form {
+    grid-template-columns: 1fr;
+    grid-template-areas: "password" "confirm" "status" "submit";
+  }
+  .admin-tab-password-form button {
+    width: 100%;
+  }
 }
 .loading {
   min-height: 100vh;
@@ -1621,7 +1716,7 @@ select {
   --cat-level: #89baff;
   --cat-feature: #c2a5fa;
 }
-:root[data-theme="light"] {
+:root {
   --cat-hash: #785600;
   --cat-t: #176739;
   --cat-o: #225ca1;
@@ -1811,6 +1906,157 @@ select {
 }
 .heading-actions > button:focus-visible {
   outline-color: #9daede;
+}
+
+/* Stronger category cues stay consistent across scoring controls and themes. */
+:root {
+  --cat-hash: #f4bd24;
+  --cat-t: #20b86b;
+  --cat-o: #3987f5;
+  --cat-f: #f1842e;
+  --cat-s: #e85687;
+  --cat-w: #a36af0;
+  --cat-r: #13bba7;
+  --cat-deduction: #ee4654;
+  --cat-level: #3987f5;
+  --cat-feature: #a36af0;
+}
+:root[data-theme="light"] {
+  --cat-hash: #875f00;
+  --cat-t: #08703d;
+  --cat-o: #1558b0;
+  --cat-f: #a84c08;
+  --cat-s: #a62b56;
+  --cat-w: #6935a8;
+  --cat-r: #08766a;
+  --cat-deduction: #a82236;
+  --cat-level: #1558b0;
+  --cat-feature: #6935a8;
+}
+.trick-row .trick {
+  background: color-mix(in srgb, var(--category) 23%, var(--panel));
+  border-color: color-mix(in srgb, var(--category) 42%, var(--border));
+}
+.trick-row .trick:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--category) 36%, var(--panel));
+  border-color: var(--category);
+}
+.trick-row .trick.selected,
+.level-buttons .selected,
+.feature-buttons .selected,
+.deduction-buttons .selected {
+  background: color-mix(in srgb, var(--category) 43%, var(--panel)) !important;
+  border-color: var(--category) !important;
+  box-shadow: inset 0 0 0 2px var(--category), 0 0 0 1px var(--panel);
+}
+.deduction-buttons button {
+  border-color: color-mix(in srgb, var(--category) 48%, var(--border));
+  background: color-mix(in srgb, var(--category) 15%, var(--panel));
+}
+.deduction-buttons button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--category) 32%, var(--panel));
+}
+.modifiers > .panel {
+  border-color: color-mix(in srgb, var(--category) 65%, var(--border));
+}
+.modifiers .panel-heading {
+  background: color-mix(in srgb, var(--category) 15%, var(--panel));
+}
+.level-buttons button,
+.feature-buttons button {
+  background: color-mix(in srgb, var(--category) 18%, var(--panel));
+  border-color: color-mix(in srgb, var(--category) 46%, var(--border));
+}
+.level-buttons button:hover:not(:disabled),
+.feature-buttons button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--category) 34%, var(--panel));
+}
+.trick-row button:focus-visible,
+.deduction-buttons button:focus-visible,
+.level-buttons button:focus-visible,
+.feature-buttons button:focus-visible {
+  outline: 3px solid var(--category);
+  outline-offset: 3px;
+}
+.trick-row .trick:disabled,
+.deduction-buttons button:disabled,
+.level-buttons button:disabled,
+.feature-buttons button:disabled {
+  opacity: .55;
+}
+.profile-trigger {
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+.profile-trigger:hover:not(:disabled) {
+  background: transparent;
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+.profile-avatar-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.profile-avatar-control > div { flex: 1; }
+.profile-avatar-control p,
+.profile-setting-row span,
+.profile-help { color: var(--muted); font-size: 12px; margin: 3px 0 0; }
+.profile-avatar-large { width: 56px; height: 56px; font-size: 16px; }
+.button-like {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel2);
+  cursor: pointer;
+}
+.button-like input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.button-like:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+.profile-settings-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.profile-settings-form > label { display: grid; gap: 5px; font-weight: 600; }
+.profile-settings-form > label .muted { font-weight: 400; }
+.profile-help, .password-privacy-notice { grid-column: 1 / -1; }
+.password-privacy-notice {
+  padding: 10px 12px;
+  border-left: 3px solid var(--teal);
+  background: var(--teal-bg);
+  color: var(--text);
+  margin: 0;
+  font-size: 12px;
+}
+.profile-settings-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+.profile-local-settings { display: grid; gap: 12px; border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
+.profile-local-settings > label { display: grid; gap: 5px; font-weight: 600; }
+.profile-setting-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.profile-setting-row > div { display: grid; }
+.profile-dialog-footer { display: flex; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.judge-profile-meta { display: block; color: var(--muted); font-size: 11px; margin: -5px 0 12px; }
+.admin-roster-avatar { width: 30px; height: 30px; object-fit: cover; border-radius: 50%; vertical-align: middle; margin-right: 8px; }
+.success { color: var(--teal); }
+@media (max-width: 620px) {
+  .profile-settings-form { grid-template-columns: 1fr; }
+  .profile-avatar-control { flex-wrap: wrap; }
+  .profile-setting-row { align-items: flex-start; }
 }
 @media (max-width: 800px) {
   .trick-row {

@@ -5,7 +5,7 @@ import { PGlite } from "@electric-sql/pglite";
 test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and attribution", async () => {
   const db = new PGlite();
   await db.exec(
-    `create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql as $$select null::uuid$$;`,
+    `create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql as $$select null::uuid$$;create schema storage;create table storage.buckets(id text primary key,name text,public boolean,file_size_limit bigint,allowed_mime_types text[]);`,
   );
   const sql = readFileSync("supabase/migrations/001_hidc.sql", "utf8").replace(
     "alter publication supabase_realtime add table public.competitors;",
@@ -137,13 +137,28 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await db.exec(
     readFileSync("supabase/migrations/004_admin_judge_access.sql", "utf8"),
   );
+  await db.exec(
+    readFileSync("supabase/migrations/005_profile_settings.sql", "utf8"),
+  );
+  const avatarSchema = await db.query<{ avatar_path: string | null }>(
+    "select avatar_path from profiles limit 1",
+  );
+  assert.equal(avatarSchema.rows[0].avatar_path, null);
+  const avatarBucket = await db.query<{
+    public: boolean;
+    file_size_limit: number;
+    allowed_mime_types: string[];
+  }>("select public,file_size_limit,allowed_mime_types from storage.buckets where id='profile-avatars'");
+  assert.equal(avatarBucket.rows[0].public, false);
+  assert.equal(Number(avatarBucket.rows[0].file_size_limit), 2 * 1024 * 1024);
+  assert.deepEqual(avatarBucket.rows[0].allowed_mime_types, ["image/jpeg", "image/png", "image/webp"]);
   const afterProfiles = (
-    await db.query<{ is_admin: boolean; id: string }>(
+    await db.query<{ is_admin: boolean; id: string; avatar_path: string | null }>(
       "select * from profiles order by id",
     )
   ).rows;
   assert.deepEqual(
-    afterProfiles.map(({ is_admin, ...p }) => p),
+    afterProfiles.map(({ is_admin, avatar_path: _avatar, ...p }) => p),
     beforeProfiles,
   );
   assert.equal(afterProfiles.find((p) => p.id === user)!.is_admin, true);

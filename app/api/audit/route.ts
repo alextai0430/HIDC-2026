@@ -1,5 +1,6 @@
 import { identity, failure } from "@/lib/server";
 import { canManage } from "@/lib/access";
+import { sanitizeAuditRows } from "@/lib/audit";
 export async function GET(req: Request) {
   try {
     const { client, profile } = await identity(req);
@@ -14,7 +15,9 @@ export async function GET(req: Request) {
       .order("id", { ascending: false })
       .limit(250);
     if (error) throw new Error(error.message);
-    return Response.json(data, { headers: { "Cache-Control": "no-store" } });
+    return Response.json(sanitizeAuditRows(data ?? []), {
+      headers: { "Cache-Control": "no-store" },
+    });
   } catch (e) {
     return failure(e);
   }
