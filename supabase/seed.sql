@@ -1,0 +1,2 @@
+insert into public.competitors(name,division,position) values ('Ethan Chen','Individual Open',1),('Sophia Lin','Individual Open',2),('Austin Diabolo Collective','Team Division',3),('Oliver Wang','Individual Juniors',4),('Mia Zhang','Individual Newcomer',5),('Daniel Liu','Individual Open',6),('Houston Diabolo Club','Exhibition',7);
+-- Demo accounts are created with scripts/seed-users.mjs, never with stored passwords.
