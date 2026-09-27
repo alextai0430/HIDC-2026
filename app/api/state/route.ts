@@ -67,8 +67,12 @@ export async function GET(req: Request) {
     }
     if (canManage(profile)) {
       result.rankings = rankGlobal(competitors!, submissions);
-      const profiles = (await client.from("profiles").select("*").order("slot"))
-        .data;
+      const profiles = (
+        await client
+          .from("profiles")
+          .select("id,name,username,role,slot,active,is_admin")
+          .order("slot")
+      ).data;
       result.profiles = profiles;
     }
     return Response.json(result, { headers: { "Cache-Control": "no-store" } });

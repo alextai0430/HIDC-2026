@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { identity, failure } from "@/lib/server";
-import { adminProtectionEnabled, canManage } from "@/lib/access";
+import { adminProtectionEnabled, canManage, canEditJudge } from "@/lib/access";
 import { usernameSchema, internalAddress } from "@/lib/usernames";
 export async function POST(req: Request) {
   try {
@@ -64,15 +64,10 @@ export async function POST(req: Request) {
       const prior = id
         ? (await client.from("profiles").select("*").eq("id", id).single()).data
         : null;
-      if (id === profile.id && profile.role === "server_admin")
-        throw new Error("Cannot modify organizer through judge management");
-      if (id) {
-        const existing = (
-          await client.from("profiles").select("*").eq("id", id).single()
-        ).data;
-        if (existing?.role !== "judge")
-          throw new Error("Only judge accounts can be modified");
-      }
+      if (id && (!prior || !canEditJudge(prior)))
+        throw new Error(
+          "Administrator accounts are protected from judge management",
+        );
       const occupied = (
         await client
           .from("profiles")
@@ -99,14 +94,26 @@ export async function POST(req: Request) {
         });
         if (result.error) throw result.error;
       }
-      const { error } = await client.from("profiles").upsert({
+      const values = {
         id,
         name: u.username,
         username: u.username,
         slot: u.slot,
         active: u.active,
         role: "judge",
-      });
+      };
+      // Conditional updates also guard against a concurrent administrator grant.
+      const result = u.id
+        ? await client
+            .from("profiles")
+            .update(values)
+            .eq("id", id!)
+            .eq("role", "judge")
+            .eq("is_admin", false)
+            .select("id")
+            .single()
+        : await client.from("profiles").insert({ ...values, is_admin: false });
+      const { error } = result;
       if (error) {
         if (!u.id) await client.auth.admin.deleteUser(id!);
         throw new Error(error.message);

@@ -43,6 +43,8 @@ export type Profile = {
   slot: number | null;
   active: boolean;
   username?: string;
+  // Optional for pre-migration offline workspaces; missing means no added privilege.
+  is_admin?: boolean;
 };
 export type Competitor = {
   id: string;

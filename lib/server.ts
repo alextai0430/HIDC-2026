@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { Profile } from "./model";
-import { adminProtectionEnabled } from "./access";
+import { adminProtectionEnabled, isAdministrator } from "./access";
 export function db() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL,
     key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -42,8 +42,8 @@ export function unlockValue(user: string) {
   return `${body}.${signature(body)}`;
 }
 export async function protectedAccess(profile: Profile) {
-  if (!adminProtectionEnabled) return true;
-  if (profile.role === "server_admin") return true;
+  if (!profile.active) return false;
+  if (!adminProtectionEnabled || isAdministrator(profile)) return true;
   const value = (await cookies()).get("hidc-admin")?.value;
   if (!value) return false;
   const [id, expiry, sig] = value.split(".");

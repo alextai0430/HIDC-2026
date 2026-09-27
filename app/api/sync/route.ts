@@ -1,3 +1,4 @@
+import { isAssignedJudge } from "@/lib/access";
 import { z } from "zod";
 import { identity, failure } from "@/lib/server";
 import { tricks, deductions } from "@/lib/model";
@@ -11,7 +12,7 @@ const op = z.object({
 export async function POST(req: Request) {
   try {
     const { client, profile } = await identity(req);
-    if (profile.role !== "judge" || !profile.slot)
+    if (!isAssignedJudge(profile))
       throw new Error("Only assigned judges may submit scores");
     const input = op.parse(await req.json());
     let payload: unknown;

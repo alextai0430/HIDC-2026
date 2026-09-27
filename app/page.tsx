@@ -25,7 +25,13 @@ import {
   Pencil,
   PanelLeft,
 } from "lucide-react";
-import { adminProtectionEnabled, canManage } from "@/lib/access";
+import {
+  adminProtectionEnabled,
+  canManage,
+  canEditJudge,
+  isAssignedJudge,
+  isAdministrator,
+} from "@/lib/access";
 import { api, demo, supabase } from "@/lib/supabase";
 import { applyLocal, LocalWorkspace, readLocal, writeLocal } from "@/lib/local";
 import {
@@ -145,7 +151,8 @@ export default function Page() {
     (s) => s.competitor_id === current?.id && s.user_id === profile?.id,
   );
   const canScore =
-    profile?.role === "judge" &&
+    !!profile &&
+    isAssignedJudge(profile) &&
     !!current &&
     !current.archived &&
     (current.status === "active" || !!own);
@@ -168,24 +175,7 @@ export default function Page() {
         },
       };
     }
-    const cached = structuredClone(next);
-    if (!demo) {
-      cached.snapshot.protected = false;
-      cached.snapshot.submissions = cached.snapshot.submissions
-        .filter((s) => s.user_id === cached.snapshot.profile.id)
-        .map((s) => {
-          delete s.total;
-          s.events = s.events.map((e) => {
-            delete e.value;
-            return e;
-          });
-          return s;
-        });
-      delete cached.snapshot.audit;
-      delete cached.snapshot.rankings;
-      delete cached.snapshot.profiles;
-    }
-    await writeLocal(next.snapshot.profile.id, cached);
+    await writeLocal(next.snapshot.profile.id, next);
     if (!demo) localStorage.setItem("hidc-last-user", next.snapshot.profile.id);
     ref.current = next;
     setWorkspace(next);
@@ -721,7 +711,7 @@ export default function Page() {
             <span>
               {organizer
                 ? "Server organizer"
-                : `${technical ? "Technical" : "Performance"} Judge ${profile?.slot}`}
+                : `${technical ? "Technical" : "Performance"} Judge ${profile?.slot}${profile && isAdministrator(profile) ? " · Administrator" : ""}`}
             </span>
           </div>
           <button
@@ -1822,8 +1812,12 @@ export default function Page() {
                       <h3>
                         {slot < 4 ? "Technical" : "Performance"} {slot}
                       </h3>
-                      <p>{p?.name ?? "Unassigned"}</p>
+                      <p>
+                        {p?.name ?? "Unassigned"}
+                        {p && !canEditJudge(p) ? " · Administrator" : ""}
+                      </p>
                       <button
+                        disabled={!!p && !canEditJudge(p)}
                         onClick={() =>
                           setUserEdit(
                             p
@@ -1842,14 +1836,16 @@ export default function Page() {
                           )
                         }
                       >
-                        {p ? "Manage account" : "Assign judge"}
+                        {p && !canEditJudge(p)
+                          ? "Protected administrator"
+                          : p ? "Manage account" : "Assign judge"}
                       </button>
                     </div>
                   );
                 })}
               </div>
               {state.profiles
-                ?.filter((p) => !p.active)
+                ?.filter((p) => !p.active && canEditJudge(p))
                 .map((p) => (
                   <div className="detail-event" key={p.id}>
                     {p.name} · Inactive

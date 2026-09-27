@@ -90,13 +90,134 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     );
     assert.equal(r.rows[0].consume_unlock_attempt, i < 5);
   }
-  await db.exec(readFileSync('supabase/migrations/003_usernames_and_development_access.sql','utf8'));
-  const usernames=await db.query<{username:string}>('select username from profiles');
-  assert.ok(usernames.rows.every(p=>p.username.length<=32));
-  await assert.rejects(db.query("select manage_competitor($1,'lock',$2,false)",[user,JSON.stringify({id:comp})]),/Organizer required/);
-  await db.query("select manage_competitor($1,'lock',$2,true)",[user,JSON.stringify({id:comp})]);
-  await db.exec('set role authenticated');
-  await assert.rejects(db.query("select manage_competitor($1,'lock',$2,true)",[user,JSON.stringify({id:comp})]),/permission denied/);
-  await db.exec('reset role');
+  await db.exec(
+    readFileSync(
+      "supabase/migrations/003_usernames_and_development_access.sql",
+      "utf8",
+    ),
+  );
+  const usernames = await db.query<{ username: string }>(
+    "select username from profiles",
+  );
+  assert.ok(usernames.rows.every((p) => p.username.length <= 32));
+  await assert.rejects(
+    db.query("select manage_competitor($1,'lock',$2,false)", [
+      user,
+      JSON.stringify({ id: comp }),
+    ]),
+    /Organizer required/,
+  );
+  await db.query("select manage_competitor($1,'lock',$2,true)", [
+    user,
+    JSON.stringify({ id: comp }),
+  ]);
+  await db.exec("set role authenticated");
+  await assert.rejects(
+    db.query("select manage_competitor($1,'lock',$2,true)", [
+      user,
+      JSON.stringify({ id: comp }),
+    ]),
+    /permission denied/,
+  );
+  await db.exec("reset role");
+  // Upgrade an existing event with scores and acknowledged operation IDs already present.
+  await db.query("update profiles set username='alexandertai' where id=$1", [
+    user,
+  ]);
+  await db.query("update profiles set username='organizer' where id=$1", [
+    admin,
+  ]);
+  const beforeProfiles = (await db.query("select * from profiles order by id"))
+    .rows;
+  const beforeScores = (await db.query("select * from submissions order by id"))
+    .rows;
+  const beforeOps = (await db.query("select * from operations order by id"))
+    .rows;
+  const beforeAudit = (await db.query("select * from audit order by id")).rows;
+  await db.exec(
+    readFileSync("supabase/migrations/004_admin_judge_access.sql", "utf8"),
+  );
+  const afterProfiles = (
+    await db.query<{ is_admin: boolean; id: string }>(
+      "select * from profiles order by id",
+    )
+  ).rows;
+  assert.deepEqual(
+    afterProfiles.map(({ is_admin, ...p }) => p),
+    beforeProfiles,
+  );
+  assert.equal(afterProfiles.find((p) => p.id === user)!.is_admin, true);
+  assert.equal(afterProfiles.find((p) => p.id === admin)!.is_admin, true);
+  assert.equal(afterProfiles.find((p) => p.id === other)!.is_admin, false);
+  assert.deepEqual(
+    (await db.query("select * from submissions order by id")).rows,
+    beforeScores,
+  );
+  assert.deepEqual(
+    (await db.query("select * from operations order by id")).rows,
+    beforeOps,
+  );
+  assert.deepEqual(
+    (await db.query("select * from audit order by id")).rows,
+    beforeAudit,
+  );
+  await invoke(op, 0); // An acknowledged pre-upgrade operation still deduplicates.
+  assert.deepEqual(
+    (await db.query("select * from submissions order by id")).rows,
+    beforeScores,
+  );
+  await invoke(crypto.randomUUID(), 2); // Pending Judge 1 work syncs after upgrade and lock.
+  await db.query("select manage_competitor($1,'activate',$2,false)", [
+    user,
+    JSON.stringify({ id: comp }),
+  ]);
+  await db.query("select manage_competitor($1,'lock',$2,false)", [
+    admin,
+    JSON.stringify({ id: comp }),
+  ]);
+  for (let slot = 2; slot <= 5; slot++) {
+    let judge = other;
+    if (slot > 2) {
+      judge = crypto.randomUUID();
+      await db.query("insert into auth.users values($1)", [judge]);
+      await db.query(
+        "insert into profiles(id,name,username,role,slot) values($1,'Judge',$2,'judge',$3)",
+        [judge, "judge" + slot, slot],
+      );
+    }
+    await assert.rejects(
+      db.query("select manage_competitor($1,'lock',$2,false)", [
+        judge,
+        JSON.stringify({ id: comp }),
+      ]),
+      /Organizer required/,
+    );
+  }
+  await db.exec("set role authenticated");
+  await assert.rejects(
+    db.query("select manage_competitor($1,'lock',$2,true)", [
+      user,
+      JSON.stringify({ id: comp }),
+    ]),
+    /permission denied/,
+  );
+  await assert.rejects(
+    db.query("update profiles set is_admin=true where id=$1", [other]),
+    /permission denied/,
+  );
+  await assert.rejects(
+    db.query("select * from submissions"),
+    /permission denied/,
+  );
+  await db.exec("reset role");
+  await db.query("update profiles set active=false where id=$1", [user]);
+  await assert.rejects(
+    db.query("select manage_competitor($1,'lock',$2,false)", [
+      user,
+      JSON.stringify({ id: comp }),
+    ]),
+    /Organizer required/,
+  );
+  await assert.rejects(invoke(crypto.randomUUID(), 3), /no longer active/);
   await db.close();
 });

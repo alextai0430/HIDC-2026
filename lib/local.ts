@@ -10,10 +10,37 @@ export type LocalWorkspace = { snapshot: Snapshot; queue: Operation[] };
 export async function readLocal(
   user: string,
 ): Promise<LocalWorkspace | undefined> {
-  return (await database()).get("workspaces", user);
+  const value = await (await database()).get("workspaces", user);
+  return value ? sanitizeWorkspace(value) : undefined;
 }
 export async function writeLocal(user: string, value: LocalWorkspace) {
-  await (await database()).put("workspaces", value, user);
+  await (await database()).put("workspaces", sanitizeWorkspace(value), user);
+}
+// Enforce privacy at the storage boundary, including for administrator judges.
+export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
+  const cached = structuredClone(value);
+  const snapshot = cached.snapshot;
+  snapshot.protected = false;
+  snapshot.submissions = snapshot.submissions
+    .filter((s) => s.user_id === snapshot.profile.id)
+    .map((s) => {
+      delete s.total;
+      s.events.forEach((e) => {
+        delete e.value;
+      });
+      return s;
+    });
+  delete snapshot.audit;
+  delete snapshot.rankings;
+  delete snapshot.profiles;
+  snapshot.personal = snapshot.personal?.map(
+    ({ competitor_id, rank, total }) => ({
+      competitor_id,
+      rank,
+      ...(snapshot.profile.slot! > 3 ? { total } : {}),
+    }),
+  );
+  return cached;
 }
 export function applyLocal(snapshot: Snapshot, op: Operation): Snapshot {
   const state = structuredClone(snapshot);
