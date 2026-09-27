@@ -96,6 +96,9 @@ export type Snapshot = {
   audit?: Record<string, unknown>[];
   rankings?: Ranking[];
   personal?: { competitor_id: string; rank: number; total?: number }[];
+  assignments?: { division: string; slot: number; user_id: string }[];
+  // True only when the server accepted this page's in-memory Admin unlock token.
+  pointAccess?: boolean;
 };
 export type Ranking = {
   competitor: Competitor;

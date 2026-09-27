@@ -1,10 +1,13 @@
 import { identity, failure } from "@/lib/server";
 import { canManage } from "@/lib/access";
 import { sanitizeAuditRows } from "@/lib/audit";
+import { requestHasAdminUnlock } from "@/lib/admin-unlock";
 export async function GET(req: Request) {
   try {
     const { client, profile } = await identity(req);
     if (!canManage(profile)) throw new Error("Administrator access required");
+    if (!requestHasAdminUnlock(req, profile.id))
+      throw new Error("Unlock Admin and turn on Show points to view score audit data.");
     const before = new URL(req.url).searchParams.get("before");
     if (!before || !/^\d+$/.test(before))
       throw new Error("Invalid audit cursor");

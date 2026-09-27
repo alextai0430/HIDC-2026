@@ -21,8 +21,9 @@ export function detailExportRows(
   profile: Profile,
   submissions: Submission[],
   competitors: Competitor[],
+  revealPoints = false,
 ) {
-  const full = canManage(profile);
+  const revealOwnPoints = revealPoints;
   return detailSubmissions(profile, submissions).map((s) => ({
     Competitor: competitors.find((c) => c.id === s.competitor_id)?.name,
     Judge: s.slot,
@@ -31,12 +32,14 @@ export function detailExportRows(
     Updated: s.updated_at,
     Events: JSON.stringify(
       s.events.map((e) =>
-        full
-          ? e
+        revealOwnPoints
+          ? { ...e, value: e.value ?? eventScore(e) }
           : { trick: e.trick, level: e.level, features: e.features, at: e.at },
       ),
     ),
-    ...(full ? { Total: s.total, Performance: s.performance.join(" / ") } : {}),
+    ...(revealOwnPoints
+      ? { Total: s.total ?? total(s), Performance: s.performance.join(" / ") }
+      : {}),
   }));
 }
 

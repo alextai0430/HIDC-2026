@@ -140,6 +140,9 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await db.exec(
     readFileSync("supabase/migrations/005_profile_settings.sql", "utf8"),
   );
+  await db.exec(
+    readFileSync("supabase/migrations/006_division_judges.sql", "utf8"),
+  );
   const avatarSchema = await db.query<{ avatar_path: string | null }>(
     "select avatar_path from profiles limit 1",
   );
@@ -208,6 +211,71 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
       /Organizer required/,
     );
   }
+  const alternateJ1 = crypto.randomUUID();
+  await db.query("insert into auth.users values($1)", [alternateJ1]);
+  await db.query(
+    "insert into profiles(id,name,username,role,slot) values($1,'Alternate Judge 1','alternate1','judge',1)",
+    [alternateJ1],
+  );
+  const judgeIds = (
+    await db.query<{ id: string; slot: number }>(
+      "select id,slot from profiles where active and role='judge' order by slot,id",
+    )
+  ).rows;
+  const judge3 = judgeIds.find((judge) => judge.slot === 3)!.id;
+  const judge4 = judgeIds.find((judge) => judge.slot === 4)!.id;
+  const judge5 = judgeIds.find((judge) => judge.slot === 5)!.id;
+  const teamGroup = [
+    { slot: 1, user_id: alternateJ1 },
+    { slot: 2, user_id: other },
+    { slot: 3, user_id: judge3 },
+    { slot: 4, user_id: judge4 },
+    { slot: 5, user_id: judge5 },
+  ];
+  await db.query("select manage_judge_assignments($1,$2,$3)", [
+    admin,
+    "Team Division",
+    JSON.stringify(teamGroup),
+  ]);
+  const teamCompetitor = crypto.randomUUID();
+  await db.query(
+    "insert into competitors(id,name,division,position) values($1,'Team test','Team Division',2)",
+    [teamCompetitor],
+  );
+  await db.query("select manage_competitor($1,'activate',$2,false)", [
+    admin,
+    JSON.stringify({ id: teamCompetitor }),
+  ]);
+  const scorePayload = JSON.stringify({ finished: true });
+  await assert.rejects(
+    db.query("select apply_score($1,1,$2,$3,0,'finish',$4)", [
+      user,
+      crypto.randomUUID(),
+      teamCompetitor,
+      scorePayload,
+    ]),
+    /not assigned to this competitor division/,
+  );
+  await db.query("select apply_score($1,2,$2,$3,0,'finish',$4)", [
+    other,
+    crypto.randomUUID(),
+    teamCompetitor,
+    scorePayload,
+  ]);
+  const nextTeamCompetitor = crypto.randomUUID();
+  await db.query(
+    "insert into competitors(id,name,division,position) values($1,'Next team','Team Division',3)",
+    [nextTeamCompetitor],
+  );
+  await assert.rejects(
+    db.query("select apply_score($1,2,$2,$3,0,'finish',$4)", [
+      other,
+      crypto.randomUUID(),
+      nextTeamCompetitor,
+      scorePayload,
+    ]),
+    /Only the active competitor can be started/,
+  );
   await db.exec("set role authenticated");
   await assert.rejects(
     db.query("select manage_competitor($1,'lock',$2,true)", [

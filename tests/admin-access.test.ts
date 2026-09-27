@@ -8,6 +8,10 @@ import * as access from "../lib/access";
 import { sanitizeAuditRows } from "../lib/audit";
 import { hashAdminTabPassword } from "../lib/admin-password";
 import {
+  createAdminUnlockToken,
+  hasValidAdminUnlock,
+} from "../lib/admin-unlock";
+import {
   sanitizeWorkspace,
   applyLocal,
   type LocalWorkspace,
@@ -107,7 +111,9 @@ test("administrator identity and judge scoring remain independent, including leg
 
 test("Admin score-view password is checked server-side for every signed-in account", async () => {
   const previous = process.env.ADMIN_VIEW_PASSWORD;
+  const previousSigningSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;
   process.env.ADMIN_VIEW_PASSWORD = "ndladm";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "unit-test-signing-secret-0123456789abcdef";
   try {
     for (const profile of [...judges, alex, organizer]) {
       const query: any = {
@@ -124,9 +130,16 @@ test("Admin score-view password is checked server-side for every signed-in accou
         (await handlers.POST(request({ password: "wrong" }))).status,
         401,
       );
+      const authorized = await handlers.POST(request({ password: "ndladm" }));
+      assert.equal(authorized.status, 200);
+      const { unlockToken } = await authorized.json();
+      assert.equal(hasValidAdminUnlock(unlockToken, profile.id), true);
       assert.equal(
-        (await handlers.POST(request({ password: "ndladm" }))).status,
-        200,
+        hasValidAdminUnlock(
+          unlockToken,
+          profile.id === organizer.id ? alex.id : organizer.id,
+        ),
+        false,
       );
     }
     const hashed = hashAdminTabPassword("changed-shared-password");
@@ -154,6 +167,24 @@ test("Admin score-view password is checked server-side for every signed-in accou
   } finally {
     if (previous === undefined) delete process.env.ADMIN_VIEW_PASSWORD;
     else process.env.ADMIN_VIEW_PASSWORD = previous;
+    if (previousSigningSecret === undefined)
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = previousSigningSecret;
+  }
+});
+
+test("Admin unlock tokens are signed, profile-bound, and expire after the page-session window", () => {
+  const previousSigningSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "unit-test-signing-secret-0123456789abcdef";
+  try {
+    const token = createAdminUnlockToken(alex.id);
+    assert.equal(hasValidAdminUnlock(token, alex.id), true);
+    assert.equal(hasValidAdminUnlock(token, organizer.id), false);
+    assert.equal(hasValidAdminUnlock(`${token}x`, alex.id), false);
+  } finally {
+    if (previousSigningSecret === undefined)
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = previousSigningSecret;
   }
 });
 
@@ -345,13 +376,22 @@ test("normal account management cannot edit, deactivate, reassign or demote eith
   }
 });
 
-test("state endpoint returns only own numeric scores to judges and global data only to administrators", async () => {
+test("state endpoint masks score data until unlock and only returns own judge points or global admin points", async () => {
   const competitor = {
     id: crypto.randomUUID(),
     name: "Test",
     division: "Individual Open",
     position: 1,
     status: "active",
+    archived: false,
+    dq: false,
+  };
+  const futureCompetitor = {
+    id: crypto.randomUUID(),
+    name: "Future competitor",
+    division: "Team Division",
+    position: 2,
+    status: "upcoming",
     archived: false,
     dq: false,
   };
@@ -383,21 +423,29 @@ test("state endpoint returns only own numeric scores to judges and global data o
     slot: 1,
     is_admin: false,
   };
+  const previousSigningSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "unit-test-signing-secret-0123456789abcdef";
+  try {
   for (const p of [...profiles, serverJudge]) {
     const client = {
       from(table: string) {
         let data: any[] =
           table === "competitors"
-            ? [competitor]
+            ? [competitor, futureCompetitor]
             : table === "submissions"
               ? [...submissions]
+              : table === "division_judges"
+                ? profiles.filter((row) => row.role === "judge").flatMap((row) => [
+                    { division: "Individual Open", slot: row.slot, user_id: row.id },
+                    { division: "Team Division", slot: row.slot, user_id: row.id },
+                  ])
               : table === "profiles"
                 ? profiles.map((row) => ({
                     ...row,
                     avatar_path: `${row.id}/private-avatar.png`,
                   }))
                 : table === "audit"
-                  ? [{ action: "test" }]
+                  ? [{ action: "put_event", prior: { value: 5 }, next: { value: 6 } }]
                   : [{ name: "Individual Open" }];
         const builder: any = {
           select: () => builder,
@@ -428,15 +476,21 @@ test("state endpoint returns only own numeric scores to judges and global data o
     );
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("Cache-Control"), "no-store");
-    const body = await response.json();
+    const hiddenBody = await response.json();
+    assert.equal(hiddenBody.pointAccess, false);
+    for (const submission of hiddenBody.submissions) {
+      assert.equal(submission.total, undefined);
+      assert.deepEqual(submission.performance, []);
+      assert.equal(submission.events[0].value, undefined);
+    }
     if (access.isAdministrator(p)) {
-      assert.equal(body.protected, true);
-      assert.equal(body.submissions.length, 5);
-      assert.equal(body.submissions[0].total, 6);
-      assert.equal(body.rankings.length, 1);
-      assert.equal(body.audit.length, 1);
-      assert.equal(body.profiles.length, 6);
-      for (const metadata of body.profiles) {
+      assert.equal(hiddenBody.protected, true);
+      assert.equal(hiddenBody.submissions.length, 5);
+      assert.equal(hiddenBody.rankings, undefined);
+      assert.equal(hiddenBody.audit.length, 1);
+      assert.deepEqual(hiddenBody.audit[0].next, { redacted: true });
+      assert.equal(hiddenBody.profiles.length, 6);
+      for (const metadata of hiddenBody.profiles) {
         assert.equal(metadata.avatar_path, undefined);
         assert.equal(metadata.email, undefined);
         assert.equal(metadata.password, undefined);
@@ -444,18 +498,45 @@ test("state endpoint returns only own numeric scores to judges and global data o
         assert.match(metadata.avatar_url, /^https:\/\/signed\.invalid\//);
       }
     } else {
-      assert.equal(body.protected, false);
-      assert.equal(body.submissions.length, 1);
-      assert.equal(body.submissions[0].user_id, p.id);
-      assert.equal(body.submissions[0].total, p.slot! <= 3 ? 6 : 30);
-      assert.equal(body.submissions[0].events[0].value, 6);
-      assert.equal(body.rankings, undefined);
-      assert.equal(body.audit, undefined);
-      assert.equal(body.profiles, undefined);
-      assert.equal(body.profile.avatar_path, undefined);
-      assert.equal(body.profile.password, undefined);
-      assert.equal(body.profile.password_hash, undefined);
+      assert.equal(hiddenBody.protected, false);
+      assert.equal(hiddenBody.submissions.length, 1);
+      assert.equal(hiddenBody.submissions[0].user_id, p.id);
+      assert.equal(hiddenBody.rankings, undefined);
+      assert.equal(hiddenBody.audit, undefined);
+      assert.equal(hiddenBody.profiles, undefined);
+      assert.deepEqual(hiddenBody.competitors.map((row: any) => row.id), [competitor.id]);
+      assert.equal(hiddenBody.profile.avatar_path, undefined);
+      assert.equal(hiddenBody.profile.password, undefined);
+      assert.equal(hiddenBody.profile.password_hash, undefined);
     }
+
+    const unlockToken = createAdminUnlockToken(p.id);
+    const unlocked = await route("state", p, client).GET(
+      new Request("http://localhost/api/state", {
+        headers: { "x-hidc-admin-unlock": unlockToken },
+      }),
+    );
+    assert.equal(unlocked.status, 200);
+    const visibleBody = await unlocked.json();
+    assert.equal(visibleBody.pointAccess, true);
+    if (access.isAdministrator(p)) {
+      assert.equal(visibleBody.submissions.length, 5);
+      assert.equal(visibleBody.submissions[0].total, 6);
+      assert.equal(visibleBody.rankings.length, 2);
+      assert.equal(visibleBody.audit.length, 1);
+    } else {
+      assert.equal(visibleBody.submissions.length, 1);
+      assert.equal(visibleBody.submissions[0].user_id, p.id);
+      assert.equal(visibleBody.submissions[0].total, p.slot! <= 3 ? 6 : 30);
+      assert.equal(visibleBody.submissions[0].events[0].value, 6);
+      assert.equal(visibleBody.rankings, undefined);
+      assert.equal(visibleBody.audit, undefined);
+    }
+  }
+  } finally {
+    if (previousSigningSecret === undefined)
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = previousSigningSecret;
   }
 });
 

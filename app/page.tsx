@@ -35,7 +35,7 @@ import {
   isAdministrator,
 } from "@/lib/access";
 import { api, demo, supabase } from "@/lib/supabase";
-import { applyLocal, clearLocal, LocalWorkspace, readLocal, writeLocal } from "@/lib/local";
+import { applyLocal, clearLocal, LocalWorkspace, readLocal, sanitizeWorkspace, writeLocal } from "@/lib/local";
 import {
   categories,
   Competitor,
@@ -89,22 +89,70 @@ const defaultKeys: Record<string, string> = {
 };
 const fmt = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
 const uid = () => crypto.randomUUID();
-const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => ({
-  profile: {
-    id: `demo-user-${role === "server_admin" ? "organizer" : slot}`,
-    name: role === "server_admin" ? "Event organizer" : `Demo Judge ${slot}`,
-    role,
-    slot: role === "judge" ? slot : null,
+const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
+  const sampleJudges = [1, 2, 3, 4, 5].map((judgeSlot): Profile => ({
+    id: `demo-user-${judgeSlot}`,
+    name: `Demo Judge ${judgeSlot}`,
+    username: `demo-judge-${judgeSlot}`,
+    role: "judge",
+    slot: judgeSlot,
     active: true,
-  },
-  competitors: demoCompetitors,
-  submissions: [],
-  protected: role === "server_admin",
-  profiles: [],
-  audit: [],
-  rankings: [],
-  personal: [],
-});
+  }));
+  const demoRoster: Competitor[] = demoCompetitors.map((competitor, index) => ({
+    ...competitor,
+    status: index === 0 ? "locked" : index === 1 ? "active" : "upcoming",
+  }));
+  const timestamp = new Date().toISOString();
+  const finishedSample = demoRoster[0];
+  const activeSample = demoRoster[1];
+  const sampleSubmissions = [
+    ...sampleJudges.map((judge) => ({
+      id: `demo-sub-${finishedSample.id}-${judge.slot}`,
+      competitor_id: finishedSample.id,
+      user_id: judge.id,
+      slot: judge.slot!,
+      events: [],
+      performance: [3, 3, 3, 3, 3, 3],
+      finished: true,
+      dq: false,
+      version: 1,
+      updated_at: timestamp,
+      submitted_at: timestamp,
+    })),
+    {
+      id: `demo-sub-${activeSample.id}-1`,
+      competitor_id: activeSample.id,
+      user_id: sampleJudges[0].id,
+      slot: 1,
+      events: [{ id: "demo-event-progress", trick: "T 2D", level: 2, features: [], at: timestamp }],
+      performance: [0, 0, 0, 0, 0, 0],
+      finished: false,
+      dq: false,
+      version: 1,
+      updated_at: timestamp,
+    },
+  ];
+  return {
+    profile: {
+      id: `demo-user-${role === "server_admin" ? "organizer" : slot}`,
+      name: role === "server_admin" ? "Event organizer" : `Demo Judge ${slot}`,
+      role,
+      slot: role === "judge" ? slot : null,
+      active: true,
+    },
+    competitors: demoRoster,
+    submissions: sampleSubmissions,
+    protected: role === "server_admin",
+    profiles: sampleJudges,
+    assignments: allDemoDivisions.map((division) =>
+      sampleJudges.map((judge) => ({ division, slot: judge.slot!, user_id: judge.id })),
+    ).flat(),
+    audit: [],
+    rankings: [],
+    personal: [],
+  };
+};
+const allDemoDivisions = [...new Set(demoCompetitors.map((competitor) => competitor.division))];
 
 export default function Page() {
   const [workspace, setWorkspace] = useState<LocalWorkspace | null>(null);
@@ -152,10 +200,14 @@ export default function Page() {
     [adminPasswordError, setAdminPasswordError] = useState(""),
     [adminPasswordBusy, setAdminPasswordBusy] = useState(false),
     [adminUnlocked, setAdminUnlocked] = useState(false),
+    [adminUnlockToken, setAdminUnlockToken] = useState<string | null>(null),
+    [showPoints, setShowPoints] = useState(false),
     [newAdminTabPassword, setNewAdminTabPassword] = useState(""),
     [confirmAdminTabPassword, setConfirmAdminTabPassword] = useState(""),
     [adminTabPasswordMessage, setAdminTabPasswordMessage] = useState(""),
     [filter, setFilter] = useState("All divisions"),
+    [assignmentDivision, setAssignmentDivision] = useState(divisions[0]),
+    [assignmentDraft, setAssignmentDraft] = useState<Record<string, string>>({}),
     [competitorEdit, setCompetitorEdit] = useState<Partial<Competitor> | null>(
       null,
     ),
@@ -167,6 +219,8 @@ export default function Page() {
   const server = !!profile && canManage(profile);
   const organizer = profile?.role === "server_admin";
   const technical = (profile?.slot ?? 1) <= 3;
+  const canViewPoints =
+    adminUnlocked && showPoints && !!adminUnlockToken && state?.pointAccess === true;
   const viewingSlot = server
     ? tab === "Performance"
       ? performanceViewSlot
@@ -199,6 +253,9 @@ export default function Page() {
       (tab === "Performance" && profile.slot >= 4)) &&
     !!current &&
     !current.archived &&
+    (server || !state.assignments || state.assignments.some(
+      (a) => a.division === current.division && a.user_id === profile.id && a.slot === profile.slot,
+    )) &&
     (current.status === "active" || !!own);
   const allDivisions = Array.from(
     new Set([
@@ -207,6 +264,59 @@ export default function Page() {
       ...(state?.competitors.map((c) => c.division) ?? []),
     ]),
   );
+  const syncStatus = demo
+    ? "Score saved locally · demo"
+    : syncError && workspace?.queue.length
+      ? "Sync failed · score saved locally"
+      : syncing
+        ? "Syncing score…"
+        : workspace?.queue.length
+          ? "Score saved locally"
+          : "Score synced";
+  const divisionAssignments = (state?.assignments ?? []).filter(
+    (a) => a.division === assignmentDivision,
+  );
+  const divisionProfiles = (state?.profiles ?? []).filter(
+    (p) => p.active && p.role === "judge",
+  );
+  const currentAssignmentDraft = Object.fromEntries(
+    divisionAssignments.map((a) => [String(a.slot), a.user_id]),
+  );
+  const nextUpcoming = [...(state?.competitors ?? [])]
+    .filter((c) => c.status === "upcoming" && !c.archived)
+    .sort((a, b) => a.position - b.position)[0];
+  const progressRows = [...(state?.competitors ?? [])]
+    .filter((c) => !c.archived)
+    .sort((a, b) => a.position - b.position)
+    .map((competitor) => {
+      const judges = (state?.assignments ?? [])
+        .filter((assignment) => assignment.division === competitor.division)
+        .sort((a, b) => a.slot - b.slot);
+      const entries = judges.map((judge) => {
+        const judgeProfile = state?.profiles?.find((p) => p.id === judge.user_id);
+        const submission = state?.submissions.find(
+          (s) => s.competitor_id === competitor.id && s.user_id === judge.user_id,
+        );
+        return {
+          ...judge,
+          name: judgeProfile?.name ?? `Judge ${judge.slot}`,
+          status: submission?.finished
+            ? "Finished"
+            : submission && submission.version > 0
+              ? "In progress"
+              : "Not started",
+        };
+      });
+      const complete = entries.length === 5 && entries.every((entry) => entry.status === "Finished");
+      const started = entries.some((entry) => entry.status !== "Not started");
+      return {
+        competitor,
+        entries,
+        complete,
+        started,
+        stateLabel: complete ? "Complete" : competitor.status === "active" ? "Active · in progress" : started ? "Started · incomplete" : "Not started · locked",
+      };
+    });
   const changeThemePreference = (preference: "system" | "light" | "dark") => {
     setThemePreference(preference);
     localStorage.setItem("hidc-theme", preference);
@@ -223,6 +333,29 @@ export default function Page() {
         snapshot: {
           ...next.snapshot,
           protected: canManage(next.snapshot.profile),
+        },
+      };
+    }
+    const viewer = next.snapshot.profile;
+    if (viewer.role === "judge" && !canManage(viewer)) {
+      const ownSubmissions = next.snapshot.submissions.filter((submission) => submission.user_id === viewer.id);
+      const ownCompetitorIds = new Set(ownSubmissions.map((submission) => submission.competitor_id));
+      const allowedActiveDivisions = new Set((next.snapshot.assignments ?? [])
+        .filter((assignment) => assignment.user_id === viewer.id && assignment.slot === viewer.slot)
+        .map((assignment) => assignment.division));
+      next = {
+        ...next,
+        snapshot: {
+          ...next.snapshot,
+          competitors: next.snapshot.competitors.filter((competitor) =>
+            ownCompetitorIds.has(competitor.id) ||
+            (competitor.status === "active" && allowedActiveDivisions.has(competitor.division)),
+          ),
+          submissions: ownSubmissions,
+          profiles: undefined,
+          audit: undefined,
+          rankings: undefined,
+          assignments: next.snapshot.assignments?.filter((assignment) => assignment.user_id === viewer.id),
         },
       };
     }
@@ -245,12 +378,23 @@ export default function Page() {
         .catch(() => {});
     }
   }, []);
+  const fetchState = useCallback(
+    () =>
+      api(
+        "state",
+        undefined,
+        adminUnlocked && showPoints && adminUnlockToken
+          ? { adminUnlockToken }
+          : undefined,
+      ),
+    [adminUnlocked, adminUnlockToken, showPoints],
+  );
   const refresh = useCallback(async () => {
     if (demo || busy.current || ref.current?.queue.length || !navigator.onLine)
       return;
     busy.current = true;
     try {
-      const snapshot: Snapshot = await api("state");
+      const snapshot: Snapshot = await fetchState();
       chain.current = chain.current.then(async () => {
         if (!ref.current?.queue.length) await commit({ snapshot, queue: [] });
       });
@@ -260,7 +404,7 @@ export default function Page() {
     } finally {
       busy.current = false;
     }
-  }, [commit]);
+  }, [commit, fetchState]);
   const sync = useCallback(async () => {
     if (demo || busy.current || !navigator.onLine || !ref.current?.queue.length)
       return;
@@ -279,7 +423,7 @@ export default function Page() {
         });
         await chain.current;
       }
-      const snapshot: Snapshot = await api("state");
+      const snapshot: Snapshot = await fetchState();
       chain.current = chain.current.then(async () => {
         if (!ref.current?.queue.length) await commit({ snapshot, queue: [] });
       });
@@ -291,7 +435,7 @@ export default function Page() {
       busy.current = false;
       setSyncing(false);
     }
-  }, [commit]);
+  }, [commit, fetchState]);
   useEffect(() => {
     // Light is the event-wide default; dark mode is an explicit console choice.
     const savedTheme = localStorage.getItem("hidc-theme");
@@ -387,6 +531,14 @@ export default function Page() {
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
   }, [themePreference]);
+  useEffect(() => {
+    if (adminUnlocked && showPoints && state && !state.pointAccess) {
+      setAdminUnlocked(false);
+      setAdminUnlockToken(null);
+      setShowPoints(false);
+      setAdminPasswordError("Admin access expired. Enter the Admin password again.");
+    }
+  }, [adminUnlocked, showPoints, state?.pointAccess]);
   useEffect(() => {
     if (!ready || !state) return;
     const timer = setInterval(() => {
@@ -631,7 +783,7 @@ export default function Page() {
         if (protectedChange) payload.currentPassword = currentPassword;
         if (newLoginPassword) payload.newPassword = newLoginPassword;
         await api("profile", payload);
-        const snapshot: Snapshot = await api("state");
+        const snapshot: Snapshot = await fetchState();
         await commit({ snapshot, queue: ref.current?.queue ?? [] });
       }
       setCurrentPassword("");
@@ -677,7 +829,7 @@ export default function Page() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Avatar upload failed.");
-      const snapshot: Snapshot = await api("state");
+      const snapshot: Snapshot = await fetchState();
       await commit({ snapshot, queue: ref.current?.queue ?? [] });
       setProfileMessage("Profile picture updated.");
       setNotice("Profile picture updated");
@@ -699,7 +851,7 @@ export default function Page() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Could not remove picture.");
-      const snapshot: Snapshot = await api("state");
+      const snapshot: Snapshot = await fetchState();
       await commit({ snapshot, queue: ref.current?.queue ?? [] });
       setProfileMessage("Profile picture removed.");
       setNotice("Profile picture removed");
@@ -720,6 +872,9 @@ export default function Page() {
     ref.current = null;
     setWorkspace(null);
     setSettingsOpen(false);
+    setAdminUnlockToken(null);
+    setAdminUnlocked(false);
+    setShowPoints(false);
   }
   async function clearOwnOfflineCache() {
     if (!profile || !workspace || workspace.queue.length) return;
@@ -732,14 +887,57 @@ export default function Page() {
     setAdminPasswordBusy(true);
     setAdminPasswordError("");
     try {
-      await api("verify-admin", { password: adminPassword });
+      const result = await api("verify-admin", { password: adminPassword });
+      if (!result.unlockToken)
+        throw new Error("The server did not provide an Admin unlock.");
+      setAdminUnlockToken(result.unlockToken);
       setAdminUnlocked(true);
+      setShowPoints(false);
       setAdminPassword("");
     } catch (e) {
       setAdminPasswordError((e as Error).message);
     } finally {
       setAdminPasswordBusy(false);
     }
+  }
+  async function toggleShowPoints() {
+    if (!adminUnlocked || !adminUnlockToken || !profile) return;
+    if (showPoints) {
+      setShowPoints(false);
+      try {
+        const snapshot: Snapshot = await api("state");
+        await commit({ snapshot, queue: ref.current?.queue ?? [] });
+      } catch (error) {
+        setSyncError((error as Error).message);
+      }
+      return;
+    }
+    try {
+      const snapshot: Snapshot = await api("state", undefined, {
+        adminUnlockToken,
+      });
+      if (!snapshot.pointAccess)
+        throw new Error("Admin access expired. Enter the Admin password again.");
+      await commit({ snapshot, queue: ref.current?.queue ?? [] });
+      setShowPoints(true);
+    } catch (error) {
+      setAdminUnlocked(false);
+      setAdminUnlockToken(null);
+      setShowPoints(false);
+      setAdminPasswordError((error as Error).message);
+    }
+  }
+  function lockAdmin() {
+    setAdminUnlocked(false);
+    setAdminUnlockToken(null);
+    setShowPoints(false);
+    setAdminPassword("");
+    setAdminPasswordError("");
+    void api("state")
+      .then((snapshot: Snapshot) =>
+        commit({ snapshot, queue: ref.current?.queue ?? [] }),
+      )
+      .catch((error) => setSyncError((error as Error).message));
   }
   async function changeAdminTabPassword(e: React.FormEvent) {
     e.preventDefault();
@@ -778,6 +976,12 @@ export default function Page() {
           );
           if (index < 0) next.snapshot.competitors.push({ ...d, id: uid() });
           else next.snapshot.competitors[index] = d;
+        } else if (action === "assignments") {
+          const assignment = data as { division: string; assignments: { slot: number; user_id: string }[] };
+          next.snapshot.assignments = [
+            ...(next.snapshot.assignments ?? []).filter((row) => row.division !== assignment.division),
+            ...assignment.assignments.map((row) => ({ ...row, division: assignment.division })),
+          ];
         } else if (action === "user")
           throw new Error(
             "Account changes require a connected Supabase project.",
@@ -801,6 +1005,9 @@ export default function Page() {
     const local = await readLocal(snapshot.profile.id);
     await commit(local ?? { snapshot, queue: [] });
     localStorage.setItem("hidc-demo-user", snapshot.profile.id);
+    setAdminUnlockToken(null);
+    setAdminUnlocked(false);
+    setShowPoints(false);
     setSelected(null);
     setTab(
       role === "server_admin"
@@ -824,7 +1031,7 @@ export default function Page() {
             state!.submissions.find(
               (s) => s.competitor_id === c.id && s.user_id === profile?.id,
             )?.submitted_at ?? "",
-          ...(technical ? {} : { Score: r.total }),
+          ...(technical ? {} : { Score: canViewPoints ? r.total : "***" }),
         };
       })
       .filter((r) => filter === "All divisions" || r.Division === filter)
@@ -876,6 +1083,10 @@ export default function Page() {
             HOUSTON INTERNATIONAL DIABOLO COMPETITION
           </span>
           <h1>Judge sign in</h1>
+          <p className="login-help">
+            Use the username and password provided by the event organizer.
+            <br />Need access help? Contact the organizer.
+          </p>
           <form onSubmit={login}>
             <label>
               Username
@@ -996,9 +1207,7 @@ export default function Page() {
             key={name}
             className={tab === name ? "active" : ""}
             onClick={() => {
-              if (name !== "Admin") setAdminUnlocked(false);
               if (name === "Admin") {
-                setAdminUnlocked(false);
                 setAdminPasswordError("");
               }
               setTab(name);
@@ -1048,7 +1257,10 @@ export default function Page() {
       )}
       {syncError && (
         <div className="alert" role="alert">
-          <span>{syncError}</span>
+          <span>
+            {syncError}
+            {!!workspace.queue.length && <small> Your score is safely stored locally until sync succeeds.</small>}
+          </span>
           <button
             onClick={() => {
               setSyncError("");
@@ -1060,7 +1272,7 @@ export default function Page() {
           <button
             onClick={() =>
               download(
-                [{ workspace: JSON.stringify(workspace) }],
+                [{ workspace: JSON.stringify(sanitizeWorkspace(workspace)) }],
                 "txt",
                 "local-backup",
               )
@@ -1198,6 +1410,15 @@ export default function Page() {
                 >
                   Finish scoring <Check size={17} />
                 </button>
+                <span className={`scoring-sync-state ${syncing ? "syncing" : syncError && workspace.queue.length ? "attention" : workspace.queue.length || demo ? "local" : "synced"}`} role="status" aria-live="polite">
+                  {syncing ? <Activity size={15} /> : syncError && workspace.queue.length ? <CloudOff size={15} /> : workspace.queue.length || demo ? <Save size={15} /> : <CheckCircle2 size={15} />}
+                  {syncStatus}
+                </span>
+                {syncError && workspace.queue.length > 0 && (
+                  <button className="sync-retry" disabled={!online || syncing} onClick={() => void sync()}>
+                    Retry sync
+                  </button>
+                )}
               </div>
             </section>
             {tab === "Technical" ? (
@@ -1252,6 +1473,11 @@ export default function Page() {
                               })}
                             </small>
                           </div>
+                        <span className="event-points" aria-label="Event points">
+                          {canViewPoints
+                            ? fmt(event.value ?? eventScore(event))
+                            : "***"}
+                        </span>
                           <button
                             className="icon"
                             title={`Edit event ${i + 1}`}
@@ -1279,12 +1505,8 @@ export default function Page() {
                   </div>
                   <div className="sequence-footer">
                     <Shield size={15} />
-                    <span>
-                      {state.protected
-                        ? "Technical total"
-                        : "Score values are protected"}
-                    </span>
-                    <b>{state.protected ? fmt(displayed?.total) : "•••"}</b>
+                    <span>Technical total</span>
+                    <b>{canViewPoints ? fmt(displayed?.total ?? (displayed ? total(displayed) : null)) : "***"}</b>
                   </div>
                 </aside>
                 <div className="scoring-controls">
@@ -1399,7 +1621,6 @@ export default function Page() {
                             onClick={() => toggleFeature(f)}
                           >
                             {f}
-                            {features.includes(f) && <Check size={13} />}
                           </button>
                         ))}
                       </div>
@@ -1440,10 +1661,14 @@ export default function Page() {
                     <span>
                       <CheckCircle2 size={14} />{" "}
                       {demo
-                        ? "Saved on this laptop"
+                        ? "Score saved locally · demo"
+                        : syncError && workspace.queue.length
+                          ? "Sync failed · score saved locally"
                         : workspace.queue.length
-                          ? `${workspace.queue.length} change(s) awaiting sync`
-                          : "All changes synced"}
+                          ? `${workspace.queue.length} change(s) saved locally · awaiting sync`
+                          : syncing
+                            ? "Syncing score…"
+                            : "Score synced"}
                     </span>
                     <button
                       disabled={!canScore}
@@ -1476,7 +1701,9 @@ export default function Page() {
                           <h3>{category}</h3>
                         </div>
                         <strong>
-                          {(displayed?.performance[i] ?? 0).toFixed(1)}
+                          {canViewPoints
+                            ? (displayed?.performance[i] ?? 0).toFixed(1)
+                            : "***"}
                         </strong>
                       </div>
                       <div className="rating-options">
@@ -1508,15 +1735,15 @@ export default function Page() {
                 <aside className="panel performance-summary">
                   <h2>Performance</h2>
                   <div className="big-total">
-                    {(
-                      displayed?.performance.reduce((a, b) => a + b, 0) ?? 0
-                    ).toFixed(1)}
+                    {canViewPoints
+                      ? (displayed?.performance.reduce((a, b) => a + b, 0) ?? 0).toFixed(1)
+                      : "***"}
                     <span>/ 30</span>
                   </div>
                   {categories.map((c, i) => (
                     <div className="summary-row" key={c}>
                       <span>{c}</span>
-                      <b>{(displayed?.performance[i] ?? 0).toFixed(1)}</b>
+                      <b>{canViewPoints ? (displayed?.performance[i] ?? 0).toFixed(1) : "***"}</b>
                     </div>
                   ))}
                 </aside>
@@ -1695,7 +1922,7 @@ export default function Page() {
                         <td>#{r.rank}</td>
                         <td>{c.name}</td>
                         <td>{c.division}</td>
-                        {!technical && <td>{fmt(r.total)}</td>}
+                        {!technical && <td>{canViewPoints ? fmt(r.total) : "***"}</td>}
                       </tr>
                     );
                   })}
@@ -1717,7 +1944,7 @@ export default function Page() {
             <div className="panel-heading">
               <h3>Submission details</h3>
             </div>
-            <div className="exports">
+            {canViewPoints && <div className="exports">
               {(["csv", "txt"] as const).map((format) => (
                 <button
                   key={format}
@@ -1729,6 +1956,7 @@ export default function Page() {
                           a.updated_at.localeCompare(b.updated_at),
                         ),
                         state.competitors,
+                        canViewPoints,
                       ),
                       format,
                       "score-details",
@@ -1738,7 +1966,8 @@ export default function Page() {
                   <Download size={14} /> Export {format.toUpperCase()}
                 </button>
               ))}
-            </div>
+            </div>}
+            {!canViewPoints && <p className="masked-points-note" role="status">Unlock Admin and turn on Show points to export numeric score details.</p>}
             {visibleSubmissions.map((s) => (
               <details className="submission-detail" key={s.id}>
                 <summary>
@@ -1752,7 +1981,9 @@ export default function Page() {
                   <span>
                     {s.finished ? "Finished" : "Draft"}
                     {s.dq ? " · DQ" : ""}
-                    {server ? ` · ${fmt(s.total)}` : ""}
+                    {canViewPoints
+                      ? ` · Total ${fmt(s.total ?? total(s))}`
+                      : " · Total ***"}
                   </span>
                 </summary>
                 {server && (
@@ -1822,14 +2053,14 @@ export default function Page() {
                             ? "Deduction"
                             : `L${e.level} · ${e.features.join(" + ") || "No features"}`}
                         </span>
-                        {server && <span>{fmt(e.value)} points</span>}
+                        <span>{canViewPoints ? `${fmt(e.value ?? eventScore(e))} points` : "*** points"}</span>
                         <time>{new Date(e.at).toLocaleString()}</time>
                       </div>
                     ))
                   : categories.map((c, i) => (
                       <div className="detail-event" key={c}>
                         <span>{c}</span>
-                        {server && <b>{s.performance[i].toFixed(1)}</b>}
+                        <b>{canViewPoints ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
                       </div>
                     ))}
               </details>
@@ -1847,6 +2078,8 @@ export default function Page() {
                       try {
                         const older = await api(
                           `audit?before=${state.audit![state.audit!.length - 1].id}`,
+                          undefined,
+                          adminUnlockToken ? { adminUnlockToken } : undefined,
                         );
                         if (!older.length) {
                           setNotice("No earlier audit records.");
@@ -1867,21 +2100,25 @@ export default function Page() {
                     Load earlier history
                   </button>
                 )}
-                {(state.audit ?? []).map((a, i) => (
-                  <details className="audit" key={i}>
-                    <summary>
-                      {String(a.created_at)} · {String(a.action)} ·{" "}
-                      {String(a.user_id)}
-                    </summary>
-                    <pre>
-                      {JSON.stringify(
-                        { prior: a.prior, next: a.next },
-                        null,
-                        2,
-                      )}
-                    </pre>
-                  </details>
-                ))}
+                {canViewPoints ? (
+                  (state.audit ?? []).map((a, i) => (
+                    <details className="audit" key={i}>
+                      <summary>
+                        {String(a.created_at)} · {String(a.action)} ·{" "}
+                        {String(a.user_id)}
+                      </summary>
+                      <pre>
+                        {JSON.stringify(
+                          { prior: a.prior, next: a.next },
+                          null,
+                          2,
+                        )}
+                      </pre>
+                    </details>
+                  ))
+                ) : (
+                  <p className="masked-points-note">Score details in audit history are hidden until Show points is enabled.</p>
+                )}
               </>
             )}
           </section>
@@ -1918,18 +2155,32 @@ export default function Page() {
           ) : (
           <section className="panel records">
             <div className="panel-heading">
-              <h3>Your score values</h3>
+              <div>
+                <h3>Admin access</h3>
+                <p className="muted admin-points-help">Unlock stays active as you move between tabs. It resets after reload.</p>
+              </div>
               <button
-                onClick={() => {
-                  setAdminUnlocked(false);
-                  setAdminPassword("");
-                  setAdminPasswordError("");
-                }}
+                onClick={lockAdmin}
               >
                 <Lock size={14} /> Lock Admin tab
               </button>
             </div>
-            {exports((format, ranked) => {
+            <div className="admin-points-toggle-row">
+              <div>
+                <b>Show points</b>
+                <span className="muted">{showPoints ? "Your permitted score data is visible across this session." : "Point values and totals stay masked until enabled."}</span>
+              </div>
+              <button
+                type="button"
+                className={`admin-points-toggle ${showPoints ? "enabled" : ""}`}
+                role="switch"
+                aria-checked={showPoints}
+                onClick={() => void toggleShowPoints()}
+              >
+                {showPoints ? "Hide points" : "Show points"}
+              </button>
+            </div>
+            {canViewPoints && exports((format, ranked) => {
               const ordered = [...personalSubmissions].sort((a, b) =>
                 ranked
                   ? (b.total ?? total(b)) - (a.total ?? total(a))
@@ -1954,7 +2205,7 @@ export default function Page() {
                     {s.finished ? "Finished" : "Draft"}
                     {s.dq ? " · DQ" : ""}
                   </span>
-                  <span>Total {fmt(s.total ?? total(s))}</span>
+                  <span>Total {canViewPoints ? fmt(s.total ?? total(s)) : "***"}</span>
                 </summary>
                 {s.slot < 4
                   ? s.events.map((e, i) => (
@@ -1962,13 +2213,13 @@ export default function Page() {
                         <span>
                           {i + 1}. {e.trick}
                         </span>
-                        <b>{fmt(e.value ?? eventScore(e))} points</b>
+                        <b>{canViewPoints ? `${fmt(e.value ?? eventScore(e))} points` : "*** points"}</b>
                       </div>
                     ))
                   : categories.map((c, i) => (
                       <div className="detail-event" key={c}>
                         <span>{c}</span>
-                        <b>{s.performance[i].toFixed(1)}</b>
+                        <b>{canViewPoints ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
                       </div>
                     ))}
               </details>
@@ -2012,14 +2263,10 @@ export default function Page() {
                 <button
                   className="primary"
                   disabled={
-                    !state.competitors.some(
-                      (c) => c.status === "upcoming" && !c.archived,
-                    )
+                    !nextUpcoming
                   }
                   onClick={() => {
-                    const next = state.competitors
-                      .filter((c) => c.status === "upcoming" && !c.archived)
-                      .sort((a, b) => a.position - b.position)[0];
+                    const next = nextUpcoming;
                     if (next)
                       setModal({
                         title: `Activate ${next.name}?`,
@@ -2030,6 +2277,105 @@ export default function Page() {
                 >
                   Start next <ArrowRight size={16} />
                 </button>
+              </div>
+            </section>
+            <section className="panel records division-assignment-panel">
+              <div className="panel-heading">
+                <h3>Division judge assignments</h3>
+                <label>
+                  Division
+                  <select
+                    aria-label="Division judge assignments"
+                    value={assignmentDivision}
+                    onChange={(event) => {
+                      const nextDivision = event.target.value;
+                      setAssignmentDivision(nextDivision);
+                      setAssignmentDraft(Object.fromEntries(
+                        (state.assignments ?? [])
+                          .filter((a) => a.division === nextDivision)
+                          .map((a) => [String(a.slot), a.user_id]),
+                      ));
+                    }}
+                  >
+                    {allDivisions.map((division) => <option key={division}>{division}</option>)}
+                  </select>
+                </label>
+              </div>
+              <p>Choose five active judges, one for each scoring slot. The same group scores this division; a judge can be assigned to multiple divisions. Assignments lock after scoring starts.</p>
+              <div className="division-assignment-grid">
+                {[1, 2, 3, 4, 5].map((slot) => {
+                  const selectedId = assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)] ?? "";
+                  const usedElsewhere = new Set([1, 2, 3, 4, 5]
+                    .filter((otherSlot) => otherSlot !== slot)
+                    .map((otherSlot) => assignmentDraft[String(otherSlot)] ?? currentAssignmentDraft[String(otherSlot)] ?? ""));
+                  return (
+                    <label key={slot}>
+                      {slot < 4 ? "Technical" : "Performance"} · Judge {slot}
+                      <select
+                        value={selectedId}
+                        onChange={(event) => setAssignmentDraft((prior) => ({ ...prior, [String(slot)]: event.target.value }))}
+                      >
+                        <option value="">Select assigned judge</option>
+                        {divisionProfiles.filter((p) => p.slot === slot).map((p) => (
+                          <option key={p.id} value={p.id} disabled={usedElsewhere.has(p.id)}>
+                            {p.name} · @{p.username}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })}
+                <button
+                  className="primary"
+                  disabled={
+                    [1, 2, 3, 4, 5].some((slot) => !(assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)])) ||
+                    new Set([1, 2, 3, 4, 5].map((slot) => assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)] ?? "")).size !== 5
+                  }
+                  onClick={() => void manage("assignments", {
+                    division: assignmentDivision,
+                    assignments: [1, 2, 3, 4, 5].map((slot) => ({
+                      slot,
+                      user_id: assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)],
+                    })),
+                  })}
+                >
+                  Save judge group
+                </button>
+              </div>
+            </section>
+            <section className="panel records progress-overview">
+              <div className="panel-heading">
+                <h3>Competitor progress</h3>
+                <span className="muted">Green only when all five assigned judges finish</span>
+              </div>
+              <div className="progress-table-wrap">
+                <div className="progress-table-header" aria-hidden="true">
+                  <span>Order</span><span>Competitor · Division</span><span>Overall</span>
+                  {[1, 2, 3, 4, 5].map((slot) => <span key={slot}>Judge {slot}</span>)}
+                </div>
+                <div className="progress-list">
+                  {progressRows.map(({ competitor, entries, complete, stateLabel }) => {
+                    const status = complete ? "progress-complete" : competitor.status === "active" ? "progress-active" : "progress-locked";
+                    return (
+                      <div className={`progress-row ${status}`} key={competitor.id}>
+                        <span className="progress-order">{String(competitor.position).padStart(2, "0")}</span>
+                        <div className="progress-competitor"><b>{competitor.name}</b><small>{competitor.division}</small></div>
+                        <span className={`progress-status ${status}`}>
+                          {complete ? "✓ Complete" : competitor.status === "active" ? "● Active · in progress" : stateLabel}
+                        </span>
+                        {entries.length === 5 ? entries.map((entry) => (
+                          <span
+                            key={entry.slot}
+                            className={`judge-progress ${entry.status === "Finished" ? "finished" : entry.status === "In progress" ? "draft" : "not-started"}`}
+                            title={`Judge ${entry.slot} · ${entry.name} · ${entry.status}`}
+                          >
+                            <b>J{entry.slot} · {entry.name}</b><em>{entry.status}</em>
+                          </span>
+                        )) : <span className="assignment-warning">Assign five judges to this division</span>}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </section>
             <section className="panel records">
@@ -2080,7 +2426,11 @@ export default function Page() {
                                 <Pencil size={13} /> Edit
                               </button>
                               <button
-                                disabled={c.archived || c.status === "active"}
+                                disabled={
+                                  c.archived || c.status === "active" ||
+                                  (c.status === "upcoming" && c.id !== nextUpcoming?.id) ||
+                                  (c.status === "locked" && !state.submissions.some((s) => s.competitor_id === c.id))
+                                }
                                 onClick={() =>
                                   setModal({
                                     title: `Activate ${c.name}?`,
@@ -2173,6 +2523,15 @@ export default function Page() {
                   );
                 })}
               </div>
+              {(state.profiles ?? [])
+                .filter((p) => p.active && canEditJudge(p) && state.profiles?.find((candidate) => candidate.slot === p.slot && candidate.active)?.id !== p.id)
+                .map((p) => (
+                  <div className="detail-event" key={p.id}>
+                    {p.avatar_url ? <img className="admin-roster-avatar" src={p.avatar_url} alt={`${p.name} profile`} /> : null}
+                    <span>{p.name} · @{p.username} · {p.slot! < 4 ? "Technical" : "Performance"} Judge {p.slot}</span>
+                    <button onClick={() => setUserEdit({ ...p, username: p.username ?? "", password: "" })}>Manage account</button>
+                  </div>
+                ))}
               {state.profiles
                 ?.filter((p) => !p.active && canEditJudge(p))
                 .map((p) => (
@@ -2278,7 +2637,7 @@ export default function Page() {
                 Rankings remain provisional until all judges finish. DQ
                 competitors rank last.
               </div>
-              {exports((format, ranked) => {
+              {canViewPoints && exports((format, ranked) => {
                 const rows = [...(state.rankings ?? [])]
                   .sort((a, b) =>
                     ranked
@@ -2328,6 +2687,9 @@ export default function Page() {
                   ranked ? "global-ranked" : "global-order",
                 );
               })}
+              {!canViewPoints && (
+                <p className="masked-points-note" role="status">Unlock Admin and turn on Show points to view global score details.</p>
+              )}
               {allDivisions
                 .filter((d) => d !== "Exhibition")
                 .map((d) => (
@@ -2356,9 +2718,10 @@ export default function Page() {
                           </tr>
                         </thead>
                         <tbody>
-                          {state.rankings
-                            ?.filter((r) => r.competitor.division === d)
-                            .map((r) => (
+                          {canViewPoints
+                            ? state.rankings
+                                ?.filter((r) => r.competitor.division === d)
+                                .map((r) => (
                               <tr key={r.competitor.id}>
                                 <td>{r.rank ?? "—"}</td>
                                 <td>{r.competitor.name}</td>
@@ -2380,7 +2743,18 @@ export default function Page() {
                                       : "Pending"}
                                 </td>
                               </tr>
-                            ))}
+                                ))
+                            : state.competitors
+                                .filter((competitor) => competitor.division === d)
+                                .sort((a, b) => a.position - b.position)
+                                .map((competitor) => (
+                                  <tr key={competitor.id}>
+                                    <td>***</td>
+                                    <td>{competitor.name}</td>
+                                    {Array.from({ length: 9 }, (_, index) => <td key={index}>***</td>)}
+                                    <td>—</td>
+                                  </tr>
+                                ))}
                         </tbody>
                       </table>
                     </div>

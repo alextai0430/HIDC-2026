@@ -32,6 +32,7 @@ export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
   // Signed avatar URLs are short-lived bearer links and must not persist in IndexedDB.
   delete snapshot.profile.avatar_url;
   snapshot.protected = false;
+  snapshot.pointAccess = false;
   snapshot.submissions = snapshot.submissions
     .filter((s) => s.user_id === snapshot.profile.id)
     .map((s) => {
@@ -44,13 +45,10 @@ export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
   delete snapshot.audit;
   delete snapshot.rankings;
   delete snapshot.profiles;
-  snapshot.personal = snapshot.personal?.map(
-    ({ competitor_id, rank, total }) => ({
-      competitor_id,
-      rank,
-      ...(snapshot.profile.slot! > 3 ? { total } : {}),
-    }),
-  );
+  snapshot.personal = snapshot.personal?.map(({ competitor_id, rank }) => ({
+    competitor_id,
+    rank,
+  }));
   return cached;
 }
 export function applyLocal(snapshot: Snapshot, op: Operation): Snapshot {

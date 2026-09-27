@@ -29,6 +29,20 @@ export async function POST(req: Request) {
         p_development: false,
       });
       if (error) throw new Error(error.message);
+    } else if (action === "assignments") {
+      const input = z.object({
+        division: z.string().trim().min(1).max(80),
+        assignments: z.array(z.object({
+          slot: z.number().int().min(1).max(5),
+          user_id: z.string().uuid(),
+        })).length(5),
+      }).parse(data);
+      const { error } = await client.rpc("manage_judge_assignments", {
+        p_actor: profile.id,
+        p_division: input.division,
+        p_assignments: input.assignments,
+      });
+      if (error) throw new Error(error.message);
     } else if (action === "division") {
       const name = z.string().trim().min(1).max(80).parse(data.name);
       const { error } = await client.from("divisions").insert({ name });
@@ -67,16 +81,6 @@ export async function POST(req: Request) {
         throw new Error(
           "Administrator accounts are protected from judge management",
         );
-      const occupied = (
-        await client
-          .from("profiles")
-          .select("id")
-          .eq("slot", u.slot)
-          .eq("active", true)
-          .neq("id", id ?? "00000000-0000-0000-0000-000000000000")
-      ).data;
-      if (u.active && occupied?.length)
-        throw new Error("Deactivate the current slot holder first");
       if (!id) {
         if (!u.password) throw new Error("Password required");
         const result = await client.auth.admin.createUser({

@@ -4,10 +4,11 @@ import {
   matchesBootstrapPassword,
   verifyAdminTabPassword,
 } from "@/lib/admin-password";
+import { createAdminUnlockToken } from "@/lib/admin-unlock";
 
 export async function POST(req: Request) {
   try {
-    const { client } = await identity(req);
+    const { client, profile } = await identity(req);
     const expected = process.env.ADMIN_VIEW_PASSWORD;
     const body = z
       .object({ password: z.string().max(256) })
@@ -36,7 +37,10 @@ export async function POST(req: Request) {
         { status: 401, headers: { "Cache-Control": "no-store" } },
       );
     }
-    return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json(
+      { unlockToken: createAdminUnlockToken(profile.id) },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (error) {
     return failure(error);
   }
