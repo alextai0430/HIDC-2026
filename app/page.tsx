@@ -2251,10 +2251,10 @@ export default function Page() {
             <label>
               {userEdit.id
                 ? "New password (leave blank to keep)"
-                : "Password (12+ characters)"}
+                : "Password (6+ characters)"}
               <input
                 type="password"
-                minLength={12}
+                minLength={6}
                 required={!userEdit.id}
                 value={userEdit.password ?? ""}
                 onChange={(e) =>

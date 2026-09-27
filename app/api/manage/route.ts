@@ -48,7 +48,7 @@ export async function POST(req: Request) {
         .object({
           id: z.string().uuid().optional(),
           username: usernameSchema,
-          password: z.string().min(12).optional(),
+          password: z.string().min(6).optional(),
           slot: z.number().int().min(1).max(5),
           active: z.boolean(),
         })
