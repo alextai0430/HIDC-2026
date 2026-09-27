@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { identity, protectedAccess, failure } from "@/lib/server";
+import { identity, failure } from "@/lib/server";
+import { canManage } from "@/lib/access";
 export async function POST(req: Request) {
   try {
     const { client, profile } = await identity(req);
-    if (!(await protectedAccess(profile)))
-      throw new Error("Scoring administrator unlock required");
+    if (!canManage(profile)) throw new Error("Administrator access required");
     const p = z
       .object({
         id: z.string().uuid(),

@@ -12,7 +12,7 @@ $env:NEXT_PUBLIC_BYPASS_AUTH='true'
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. The demo account selector previews all five judge slots and the organizer. Demo scoring and roster changes are local to each demo account on this browser. They do not sync to other laptops. The demo does not create real Auth users or connect to event data. In open-admin mode, local sample submissions have calculated values and provisional rankings; these are not official event results. A connected Supabase installation enables those workflows.
+Open http://127.0.0.1:3000. The demo account selector previews all five judge slots and the organizer. Demo scoring and roster changes are local to each demo account on this browser. They do not sync to other laptops. The demo does not create real Auth users or connect to event data. Local demo results are provisional and are not official event results. A connected Supabase installation enables those workflows.
 
 ## Connect the real event
 
@@ -22,9 +22,8 @@ Open http://127.0.0.1:3000. The demo account selector previews all five judge sl
    - `NEXT_PUBLIC_SUPABASE_URL`: the project's HTTPS URL.
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: its publishable/anon key. This is browser-safe with the supplied RLS policies.
    - `SUPABASE_SERVICE_ROLE_KEY`: its secret service-role key. Server only; never share with judges or prefix with `NEXT_PUBLIC`.
-   - `NEXT_PUBLIC_ADMIN_PROTECTION_ENABLED=false`: default for development/testing. All signed-in accounts can open Admin, Server Access Control, score details, technical values, global rankings, and management tools without an additional password. Set `true` and rebuild to restore original permission boundaries. This is independent of judge sign-in and demo bypass.
-   - `SCORING_ADMIN_PASSWORD` (disabled while protection is false): a long, unique password shared only with designated scoring administrators.
-   - `ADMIN_COOKIE_SECRET` (disabled while protection is false): at least 32 cryptographically random characters, server only. Changing it invalidates admin unlock cookies.
+   - `NEXT_PUBLIC_ADMIN_PROTECTION_ENABLED`: retained legacy setting; the current account-based permissions ignore its value.
+   - `SCORING_ADMIN_PASSWORD` and `ADMIN_COOKIE_SECRET`: retained legacy settings; the current app does not use an additional admin password.
    - `NEXT_PUBLIC_BYPASS_AUTH=false`: required for a real event. This is a build-time setting: rebuild after changing it.
 4. In Supabase Authentication → Users, create the organizer's email/password account. Copy its UUID, then run:
 
@@ -48,14 +47,12 @@ For five test accounts, run `node --env-file=.env.local scripts/seed-users.mjs`.
 
 ## Scoring and privacy decisions
 
-- Technical base values and compounded level/features live exclusively in `lib/scoring.ts`, imported only by server routes and tests. There is no Execution multiplier or control.
-- With admin protection enabled, ordinary technical judges see event labels and their own ranking positions, never technical values. Administrator judges can also access protected technical values. The brief conflicts on personal technical totals; this implementation follows its stronger prohibition on revealing technical scores, including in personal exports.
-- Performance judges see their own six values and total out of 30.
-- With protection enabled, scoring admin unlock is bound to the authenticated user with a signed, HttpOnly, SameSite cookie, expiring after four hours. Production cookies require HTTPS. Each attempt checks the configured password directly; the browser never receives the admin password.
-- Scoring admins can inspect all submissions, export records, reopen/finish submissions, change submission DQ state, and inspect audit history. With protection enabled, global combined rankings are returned only for permanent administrators (`is_admin=true` or the backup `server_admin` role); in the default development mode every signed-in active account can access them.
-- Numeric tables have RLS enabled with no browser read/write policies. Browser database grants are revoked for submissions, operations, and audit. Only authenticated server routes use the service role, and, with protection enabled, ordinary responses contain only the current judge's submissions with no computed technical values.
-- Sensitive admin responses are not written to IndexedDB. The offline cache retains only the current user's own label-based entries; admin unlock is not restored from browser storage.
-- Realtime broadcasts the roster and a content-free change signal, never score payloads. An authenticated refresh obtains authorized data; a five-second fallback handles missed notifications.
+- `Score Details` always opens without another password. Ordinary judges see only their own competitor records, trick names, levels, features, deductions, timestamps and status. Technical point values and totals do not appear in this view or its exports.
+- `Admin` shows the signed-in judge's own event values and totals, or their own performance category values and total. It never lists another judge's entry or combined/final results. Own values can be calculated offline from the common scoring rules; computed values are not persisted to IndexedDB.
+- Only active accounts with `is_admin=true` or `role='server_admin'` receive all submissions, audit history, account lists and global rankings. They see every tab, including read-only views of all technical and performance judge slots; only a judge assigned to a slot may submit its score. Server Access Control retains floor, account, division and global-results management.
+- The old `/api/unlock` password route is disabled. Environment flags and browser cookies cannot turn an ordinary judge into a server administrator. The server reloads the active profile on each request and scopes `state`, `manage`, `review` and `audit` accordingly.
+- PostgreSQL RLS and grants deny browser access to submission, operation and audit tables. The service-role key is used only on the server. Realtime broadcasts content-free refresh signals, never score payloads.
+- IndexedDB keeps only the current user's own label-based entries and pending operation queue. It removes global results, account lists, audit history and computed scores, even for administrator accounts. Local storage and UI state cannot authorize a server request.
 
 ## Official results
 
@@ -84,7 +81,7 @@ npm run build
 npm start
 ```
 
-Set the variables above in the hosting provider's environment settings before building. For a real competition set bypass false and `NEXT_PUBLIC_ADMIN_PROTECTION_ENABLED=true`, configure the retained admin secrets, and rebuild. Use HTTPS. Point every judge laptop at the same URL and Supabase project. `npm start` binds to loopback for local testing; on a self-hosted server use `npx next start --hostname 0.0.0.0` behind an HTTPS reverse proxy. No cloud deployment or live Supabase credentials are bundled with this repository.
+Set the variables above in the hosting provider's environment settings before building. For a real competition set bypass false. The retained admin-protection flag no longer changes permissions; account flags do. Use HTTPS. Point every judge laptop at the same URL and Supabase project. `npm start` binds to loopback for local testing; on a self-hosted server use `npx next start --hostname 0.0.0.0` behind an HTTPS reverse proxy. The project is deployed through the existing private GitHub repository and Vercel project. No live Supabase credentials are bundled with this repository.
 
 ## Verification
 
@@ -100,35 +97,17 @@ Each trick row has a shared section color: # gold, T green, O blue, F orange, S 
 
 Scoring assignment and administration are independent. `alexandertai` remains `role='judge', slot=1, active=true` and gains `is_admin=true`. The `organizer` account keeps `role='server_admin', slot=NULL` with `is_admin=true` as a backup. Other judges default to `is_admin=false`. No Auth account, UUID, password, slot, submission, or operation is recreated or reassigned.
 
-With production protection enabled, permanent administrators have immediate access to management, protected scores, audit history, and global rankings. Judge 1 still opens on Technical and keeps scoring and synchronizing as Judge 1. Ordinary judges retain their own scoring access. The existing explicit scoring-password unlock still delegates temporary score-review access; it never grants account/roster management or global rankings. Do not share that password with ordinary judges. Development open-admin mode remains available and intentionally gives every active signed-in account administrative access while the flag is false.
+Permanent administrators have immediate access to management, all judges' scores, audit history and global rankings. Judge 1 keeps scoring and synchronizing as Judge 1. Ordinary judges receive only their own submissions and personal score values; the extra administrator password and open-admin development mode are disabled.
 
 Normal judge management cannot edit either administrator account, including passwords, usernames, slots, active status, or privileges. Administrator grants are controlled in the database, never by a browser-supplied account payload. Deliberate administrator changes require a separate database maintenance operation. Keep Judge 1 assigned to alexandertai.
 
 Offline writes are sanitized at the IndexedDB boundary for every account: only the current user's submissions, without computed totals/event values, are retained. Global rankings, account lists, audit history, and the protected-access flag are removed. Pending operations and their IDs/versions remain intact. Cached privileges cannot authorize a server request; each request reloads the active profile from the database. Protected data returns only after an authorized online refresh.
 
-### Safe rollout for the existing live installation
+### Existing live installation
 
-Local implementation does not apply SQL, modify production, commit, push, or deploy automatically. Use this order during a pause in scoring:
+Migration 004 has already been applied and verified in project `msmdzuprjankfsgdozed`: alexandertai is still Judge 1 with `is_admin=true`, organizer remains the backup administrator, judges 2–5 have `is_admin=false`, and existing profile UUIDs and slots are unchanged. Do not rerun migrations 001–004 or blindly run `supabase db push`. Commit only reviewed source, tests and documentation to the existing private repository; `.env.local`, ZIP archives and credentials must stay out of Git. A push to the connected production branch can start a Vercel deployment, so review and test first.
 
-1. Back up Supabase project `msmdzuprjankfsgdozed` before any migration. Ensure all laptops have synchronized their pending queues, then take a current restorable database backup, including Auth data, profiles, submissions, operations, audit, schema and functions. Store exports securely outside the repository. Follow [Supabase database backup guidance](https://supabase.com/docs/guides/platform/backups) or its [CLI backup/restore procedure](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore). A CSV roster alone is not a database backup. Enter any database credentials privately, never in chat or committed files.
-2. In Supabase SQL Editor, record existing profile UUIDs, roles, slots and active states, plus submission/operation counts. Apply **only** `supabase/migrations/004_admin_judge_access.sql`. It runs in a transaction and replaces only the roster function's authorization condition; reservation, locking, audit and scoring behavior remain intact. Do not rerun 001–003 or blindly run `supabase db push` against the manually migrated database.
-3. Run the verification query below. Confirm alexandertai has the same UUID and judge slot 1 with admin true; organizer has its same UUID, server_admin role, null slot and admin true; judges 2–5 have admin false. Compare the scoring counts and historical records with the backup before proceeding.
-4. Review `git diff` and `git status`. Confirm `git check-ignore .env.local` succeeds. Stage only the reviewed source, tests, README and migration 004, commit and push to the existing private HIDC-2026 repository. Do not stage source ZIP archives, database exports, credentials or environment files. Pushing the connected production branch can immediately start the Vercel deployment, so migration verification must happen first.
-5. Wait for the existing Vercel project to deploy that commit. Keep production `NEXT_PUBLIC_BYPASS_AUTH=false` and `NEXT_PUBLIC_ADMIN_PROTECTION_ENABLED=true`; retain existing server-only secrets. No new environment variables or password changes are needed. Confirm the deployed commit matches the tested source and the build passes.
-6. At https://hidc-2026.vercel.app, sign in as alexandertai. Confirm Technical Judge 1 and Administrator are both displayed; test roster/division management, activation/locking, account creation/edit/deactivation of a disposable non-admin test account, protected scores, audit history, and global rankings. Confirm both administrator accounts are protected from normal account edits.
-7. In separate browser sessions, sign in as judges 2–5. Without a scoring-admin unlock, confirm no protected values, audit data, other judges' submissions, or global rankings are returned, and management/review/audit requests are rejected. Confirm the backup organizer still has administrator access.
-8. Rehearse scoring with all five judges: activate a test routine, add technical and performance scores, disconnect/reconnect Judge 1, finish and sync all entries, and verify shared rankings. Confirm zero pending operations and no global/admin payload in IndexedDB. Use reliable venue Wi-Fi and complete this five-judge rehearsal before contest use.
+Before contest use, test separate sessions for an ordinary technical judge, ordinary performance judge, alexandertai and organizer. Check Score Details, Admin, Server Access Control, global rankings, technical/performance slot selectors, exports, direct API access, offline queue and synchronization. Keep venue Wi-Fi reliable and rehearse with all five judges.
 
-```sql
-select id, username, role, slot, active, is_admin
-from public.profiles
-order by slot nulls last, username;
 
-select 'submissions' as kind, count(*) from public.submissions
-union all
-select 'operations', count(*) from public.operations;
-```
-
-If the application deployment fails after 004, the additive schema is compatible with the previous app: the backup organizer retains access. Roll back the Vercel app deployment if needed; leave scoring data and migration history intact. Do not drop the new column or restore an old backup over new scoring without a separate recovery plan.
-
-Tests cover actual API handlers with mocked external services, plus PostgreSQL migration/RLS tests with preexisting scores and operations. They verify administrator Judge 1 scoring, backup access, denial for judges 2–5, protected account edits, six-character passwords, and offline redaction. They do not replace live Supabase Auth/realtime verification after deployment.
+Tests cover actual API handlers with mocked external services, plus PostgreSQL migration/RLS tests with preexisting scores and operations. They verify administrator Judge 1 scoring, backup access, denial for judges 2–5, protected account edits, six-character passwords, personal versus global API scope, exports and offline redaction. They do not replace live Supabase Auth/realtime verification after deployment.

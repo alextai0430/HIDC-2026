@@ -864,31 +864,10 @@ footer > span > span {
 }
 .summary-row {
   display: flex;
-  flex-wrap: wrap;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
   font-size: 13px;
-}
-.summary-row > div {
-  width: 100%;
-  height: 4px;
-  background: var(--border);
-  border-radius: 3px;
-}
-.summary-row i {
-  display: block;
-  background: var(--action-bg);
-  height: 100%;
-  border-radius: 3px;
-  transition: width 0.2s;
-}
-.performance-summary > p {
-  font-size: 11px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 30px;
 }
 .records .panel-heading {
   border-bottom: 1px solid var(--border);

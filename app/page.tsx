@@ -26,7 +26,6 @@ import {
   PanelLeft,
 } from "lucide-react";
 import {
-  adminProtectionEnabled,
   canManage,
   canEditJudge,
   isAssignedJudge,
@@ -39,7 +38,6 @@ import {
   Competitor,
   deductions,
   demoCompetitors,
-  descriptions,
   divisions,
   Event,
   Operation,
@@ -48,6 +46,13 @@ import {
   tricks,
 } from "@/lib/model";
 import { download } from "@/lib/export";
+import {
+  detailExportRows,
+  detailSubmissions,
+  ownSubmissions,
+  personalScoreExportRows,
+} from "@/lib/scoped";
+import { eventScore, total } from "@/lib/scoring";
 
 const defaultKeys: Record<string, string> = {
   submit: "Enter",
@@ -91,7 +96,7 @@ const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => ({
   },
   competitors: demoCompetitors,
   submissions: [],
-  protected: !adminProtectionEnabled || role === "server_admin",
+  protected: role === "server_admin",
   profiles: [],
   audit: [],
   rankings: [],
@@ -110,6 +115,8 @@ export default function Page() {
     [syncError, setSyncError] = useState(""),
     [notice, setNotice] = useState(""),
     [tab, setTab] = useState("Technical"),
+    [technicalViewSlot, setTechnicalViewSlot] = useState(1),
+    [performanceViewSlot, setPerformanceViewSlot] = useState(4),
     [selected, setSelected] = useState<string | null>(null),
     [theme, setTheme] = useState("dark");
   const [newDivision, setNewDivision] = useState("");
@@ -128,7 +135,6 @@ export default function Page() {
   const [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
     [loginBusy, setLoginBusy] = useState(false),
-    [adminPassword, setAdminPassword] = useState(""),
     [filter, setFilter] = useState("All divisions"),
     [competitorEdit, setCompetitorEdit] = useState<Partial<Competitor> | null>(
       null,
@@ -141,6 +147,11 @@ export default function Page() {
   const server = !!profile && canManage(profile);
   const organizer = profile?.role === "server_admin";
   const technical = (profile?.slot ?? 1) <= 3;
+  const viewingSlot = server
+    ? tab === "Performance"
+      ? performanceViewSlot
+      : technicalViewSlot
+    : (profile?.slot ?? 1);
   const active = state?.competitors.find(
     (c) => c.status === "active" && !c.archived,
   );
@@ -150,9 +161,22 @@ export default function Page() {
   const own = state?.submissions.find(
     (s) => s.competitor_id === current?.id && s.user_id === profile?.id,
   );
+  const displayed = state?.submissions.find(
+    (s) =>
+      s.competitor_id === current?.id &&
+      s.slot === viewingSlot &&
+      (server || s.user_id === profile?.id),
+  );
+  const visibleSubmissions =
+    profile && state ? detailSubmissions(profile, state.submissions) : [];
+  const personalSubmissions =
+    profile && state ? ownSubmissions(profile, state.submissions) : [];
   const canScore =
     !!profile &&
     isAssignedJudge(profile) &&
+    profile.slot === viewingSlot &&
+    ((tab === "Technical" && profile.slot <= 3) ||
+      (tab === "Performance" && profile.slot >= 4)) &&
     !!current &&
     !current.archived &&
     (current.status === "active" || !!own);
@@ -169,9 +193,7 @@ export default function Page() {
         ...next,
         snapshot: {
           ...next.snapshot,
-          protected:
-            !adminProtectionEnabled ||
-            next.snapshot.profile.role === "server_admin",
+          protected: canManage(next.snapshot.profile),
         },
       };
     }
@@ -179,7 +201,7 @@ export default function Page() {
     if (!demo) localStorage.setItem("hidc-last-user", next.snapshot.profile.id);
     ref.current = next;
     setWorkspace(next);
-    if (demo && !adminProtectionEnabled) {
+    if (demo) {
       void api("demo-scores", next.snapshot)
         .then((scores) => {
           if (ref.current === next) {
@@ -607,7 +629,13 @@ export default function Page() {
       <main className="login">
         <div className="login-card">
           <div className="brand">
-            <img className="brand-logo" src="/ndl-emblem.jpg" width={56} height={56} alt="National Diabolo League" />
+            <img
+              className="brand-logo"
+              src="/ndl-emblem.jpg"
+              width={56}
+              height={56}
+              alt="National Diabolo League"
+            />
             <strong>
               HIDC <em>2026</em>
             </strong>
@@ -615,16 +643,7 @@ export default function Page() {
           <span className="eyebrow">
             HOUSTON INTERNATIONAL DIABOLO COMPETITION
           </span>
-          <h1>
-            Your seat at the
-            <br />
-            judges’ table.
-          </h1>
-          <p>
-            Sign in with your assigned judge account.
-            <br />
-            Your scoring station is ready when you are.
-          </p>
+          <h1>Judge sign in</h1>
           <form onSubmit={login}>
             <label>
               Username
@@ -652,17 +671,16 @@ export default function Page() {
             </button>
           </form>
           {syncError && <p className="error">{syncError}</p>}
-          <div className="login-foot">
-            <Shield size={16} /> Secure judge access · HIDC 2026
-          </div>
         </div>
       </main>
     );
   const nav = [
     ...(server ? ["Server Access Control"] : []),
-    ...(profile?.role === "judge"
-      ? [technical ? "Technical" : "Performance"]
-      : []),
+    ...(server
+      ? ["Technical", "Performance"]
+      : profile?.role === "judge"
+        ? [technical ? "Technical" : "Performance"]
+        : []),
     "Score Details",
     "Saved Competitors",
     "Rankings",
@@ -681,7 +699,13 @@ export default function Page() {
             localStorage.setItem("hidc-theme", next);
           }}
         >
-          <img className="brand-logo" src="/ndl-emblem.jpg" width={56} height={56} alt="National Diabolo League" />
+          <img
+            className="brand-logo"
+            src="/ndl-emblem.jpg"
+            width={56}
+            height={56}
+            alt="National Diabolo League"
+          />
           <strong>
             HIDC <em>2026</em>
           </strong>
@@ -723,7 +747,6 @@ export default function Page() {
                 return;
               }
               localStorage.removeItem("hidc-last-user");
-              if (!demo) void api("unlock", { lock: true }).catch(() => {});
               void supabase?.auth.signOut();
               ref.current = null;
               setWorkspace(null);
@@ -758,8 +781,6 @@ export default function Page() {
               <Shield size={16} />
             )}
             <span>{name}</span>
-            {(name === "Score Details" || name === "Admin") &&
-              !state.protected && <Lock size={12} />}
           </button>
         ))}
         <span className="nav-end">
@@ -847,15 +868,6 @@ export default function Page() {
                   ? "Performance scoring"
                   : tab}
             </h1>
-            <p>
-              {tab === "Technical"
-                ? "Focus on the routine. Every event is saved as you go."
-                : tab === "Performance"
-                  ? "Capture the artistry. Six categories, one complete performance."
-                  : tab === "Server Access Control"
-                    ? "Manage the floor, the judging panel, and official results."
-                    : "Your competition records, securely in one place."}
-            </p>
           </div>
           <div className="heading-actions">
             {(tab === "Technical" || tab === "Performance") && (
@@ -898,7 +910,7 @@ export default function Page() {
               <div className="routine-meta">
                 <span>YOUR SUBMISSION</span>
                 <b>
-                  {own?.finished
+                  {displayed?.finished
                     ? "Finished"
                     : own
                       ? "In progress"
@@ -906,6 +918,29 @@ export default function Page() {
                 </b>
               </div>
               <div className="strip-actions">
+                {server && (
+                  <label>
+                    View judge{" "}
+                    <select
+                      aria-label="View judge submission"
+                      value={viewingSlot}
+                      onChange={(e) => {
+                        const slot = Number(e.target.value);
+                        if (tab === "Technical") setTechnicalViewSlot(slot);
+                        else setPerformanceViewSlot(slot);
+                        clear();
+                      }}
+                    >
+                      {(tab === "Technical" ? [1, 2, 3] : [4, 5]).map(
+                        (slot) => (
+                          <option value={slot} key={slot}>
+                            Judge {slot}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+                )}
                 <button
                   disabled={!canScore}
                   onClick={() => {
@@ -933,24 +968,21 @@ export default function Page() {
                     <h3>
                       <PanelLeft size={16} /> Trick sequence
                     </h3>
-                    <span className="count">{own?.events.length ?? 0}</span>
+                    <span className="count">
+                      {displayed?.events.length ?? 0}
+                    </span>
                   </div>
                   <div className="sequence-list">
-                    {!own?.events.length ? (
+                    {!displayed?.events.length ? (
                       <div className="empty-sequence">
                         <Layers size={28} />
-                        <h4>A clean slate.</h4>
-                        <p>
-                          Recorded tricks and deductions
-                          <br />
-                          will appear here in order.
-                        </p>
+                        <h4>No events yet</h4>
                         <span>
                           Select a trick to begin <ArrowRight size={13} />
                         </span>
                       </div>
                     ) : (
-                      own.events.map((event, i) => (
+                      displayed.events.map((event, i) => (
                         <div
                           key={event.id}
                           data-category={
@@ -1013,7 +1045,7 @@ export default function Page() {
                         ? "Technical total"
                         : "Score values are protected"}
                     </span>
-                    <b>{state.protected ? fmt(own?.total) : "•••"}</b>
+                    <b>{state.protected ? fmt(displayed?.total) : "•••"}</b>
                   </div>
                 </aside>
                 <div className="scoring-controls">
@@ -1178,16 +1210,17 @@ export default function Page() {
                       className="danger-quiet"
                       onClick={() =>
                         setModal({
-                          title: own?.dq
+                          title: displayed?.dq
                             ? "Remove disqualification?"
                             : "Disqualify this submission?",
                           body: "This is a consequential scoring decision and will be recorded in the audit trail.",
-                          action: () => persistAction("dq", { dq: !own?.dq }),
+                          action: () =>
+                            persistAction("dq", { dq: !displayed?.dq }),
                         })
                       }
                     >
                       <Flag size={13} />
-                      {own?.dq ? "Undo disqualification" : "Disqualify"}
+                      {displayed?.dq ? "Undo disqualification" : "Disqualify"}
                     </button>
                   </div>
                 </div>
@@ -1201,9 +1234,10 @@ export default function Page() {
                         <span className="category-index">0{i + 1}</span>
                         <div>
                           <h3>{category}</h3>
-                          <p>{descriptions[i]}</p>
                         </div>
-                        <strong>{(own?.performance[i] ?? 0).toFixed(1)}</strong>
+                        <strong>
+                          {(displayed?.performance[i] ?? 0).toFixed(1)}
+                        </strong>
                       </div>
                       <div className="rating-options">
                         {Array.from({ length: 11 }, (_, n) => n * 0.5).map(
@@ -1212,7 +1246,7 @@ export default function Page() {
                               key={value}
                               disabled={!canScore}
                               className={
-                                (own?.performance[i] ?? 0) === value
+                                (displayed?.performance[i] ?? 0) === value
                                   ? "selected"
                                   : ""
                               }
@@ -1232,30 +1266,19 @@ export default function Page() {
                   ))}
                 </div>
                 <aside className="panel performance-summary">
-                  <span className="eyebrow">PERFORMANCE SUMMARY</span>
-                  <h2>A complete picture.</h2>
+                  <h2>Performance</h2>
                   <div className="big-total">
-                    {(own?.performance.reduce((a, b) => a + b, 0) ?? 0).toFixed(
-                      1,
-                    )}
+                    {(
+                      displayed?.performance.reduce((a, b) => a + b, 0) ?? 0
+                    ).toFixed(1)}
                     <span>/ 30</span>
                   </div>
                   {categories.map((c, i) => (
                     <div className="summary-row" key={c}>
                       <span>{c}</span>
-                      <b>{(own?.performance[i] ?? 0).toFixed(1)}</b>
-                      <div>
-                        <i
-                          style={{
-                            width: `${(own?.performance[i] ?? 0) * 20}%`,
-                          }}
-                        />
-                      </div>
+                      <b>{(displayed?.performance[i] ?? 0).toFixed(1)}</b>
                     </div>
                   ))}
-                  <p>
-                    <Shield size={14} /> Only your own scores are shown.
-                  </p>
                 </aside>
               </div>
             )}
@@ -1345,20 +1368,41 @@ export default function Page() {
                                 : "Not started"}
                           </td>
                           <td>
-                            <button
-                              disabled={
-                                profile?.role !== "judge" ||
-                                (!s && c.status !== "active")
-                              }
-                              onClick={() => {
-                                setSelected(c.id);
-                                setTab(technical ? "Technical" : "Performance");
-                                clear();
-                              }}
-                            >
-                              {s ? "Open entry" : "Score"}
-                              <ChevronRight size={14} />
-                            </button>
+                            {server ? (
+                              <div className="row-actions">
+                                {(["Technical", "Performance"] as const).map(
+                                  (view) => (
+                                    <button
+                                      key={view}
+                                      onClick={() => {
+                                        setSelected(c.id);
+                                        setTab(view);
+                                        clear();
+                                      }}
+                                    >
+                                      {view}
+                                    </button>
+                                  ),
+                                )}
+                              </div>
+                            ) : (
+                              <button
+                                disabled={
+                                  !isAssignedJudge(profile!) ||
+                                  (!s && c.status !== "active")
+                                }
+                                onClick={() => {
+                                  setSelected(c.id);
+                                  setTab(
+                                    technical ? "Technical" : "Performance",
+                                  );
+                                  clear();
+                                }}
+                              >
+                                {s ? "Open entry" : "Score"}
+                                <ChevronRight size={14} />
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1383,16 +1427,6 @@ export default function Page() {
                   <option key={d}>{d}</option>
                 ))}
               </select>
-            </div>
-            <div className="info-note">
-              <Shield size={17} />
-              {organizer
-                ? "Official combined rankings are in Server Access Control."
-                : technical
-                  ? "Only your own placement is shown. Technical scores stay protected."
-                  : "Rankings use only your own finished performance submissions."}
-              {demo &&
-                " Rankings are calculated by the connected server; demo entries are stored locally."}
             </div>
             {exports(exportPersonal)}
             <table>
@@ -1438,105 +1472,50 @@ export default function Page() {
             )}
           </section>
         )}
-        {(tab === "Admin" || tab === "Score Details") &&
-          (!state.protected ? (
-            <section className="locked panel">
-              <div className="lock-emblem">
-                <Lock size={30} />
-              </div>
-              <span className="eyebrow">PROTECTED WORKSPACE</span>
-              <h2>Scoring administrator access</h2>
-              <p>
-                Score values, detailed entries, and audit history
-                <br />
-                are reserved for authorized scoring administrators.
-              </p>
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  try {
-                    if (demo)
-                      throw new Error(
-                        "Admin unlock requires Supabase and a server-configured password. Use the organizer demo to explore management.",
-                      );
-                    await api("unlock", { password: adminPassword });
-                    setAdminPassword("");
-                    await refresh();
-                  } catch (e) {
-                    setSyncError((e as Error).message);
+        {tab === "Score Details" && (
+          <section className="panel records">
+            <div className="panel-heading">
+              <h3>Submission details</h3>
+            </div>
+            <div className="exports">
+              {(["csv", "txt"] as const).map((format) => (
+                <button
+                  key={format}
+                  onClick={() =>
+                    download(
+                      detailExportRows(
+                        profile!,
+                        [...visibleSubmissions].sort((a, b) =>
+                          a.updated_at.localeCompare(b.updated_at),
+                        ),
+                        state.competitors,
+                      ),
+                      format,
+                      "score-details",
+                    )
                   }
-                }}
-              >
-                <label className="sr-only" htmlFor="admin-password">
-                  Admin password
-                </label>
-                <input
-                  id="admin-password"
-                  type="password"
-                  placeholder="Scoring admin password"
-                  value={adminPassword}
-                  onChange={(e) => setAdminPassword(e.target.value)}
-                  required
-                />
-                <button className="primary">
-                  Unlock workspace <ArrowRight size={16} />
+                >
+                  <Download size={14} /> Export {format.toUpperCase()}
                 </button>
-              </form>
-              <small>
-                <Shield size={13} /> Unlock expires after four hours.
-              </small>
-            </section>
-          ) : (
-            <section className="panel records">
-              <div className="panel-heading">
-                <h3>Submission details & audit</h3>
-                {adminProtectionEnabled && !server && (
-                  <button
-                    onClick={async () => {
-                      await api("unlock", { lock: true });
-                      await refresh();
-                    }}
-                  >
-                    <Lock size={14} /> Lock workspace
-                  </button>
-                )}
-              </div>
-              {exports((format, ranked) => {
-                const rows = [...state.submissions]
-                  .sort((a, b) =>
-                    ranked
-                      ? (b.total ?? 0) - (a.total ?? 0)
-                      : a.updated_at.localeCompare(b.updated_at),
-                  )
-                  .map((s) => ({
-                    Competitor: state.competitors.find(
-                      (c) => c.id === s.competitor_id,
-                    )?.name,
-                    Judge: s.slot,
-                    Total: s.total,
-                    Finished: s.finished,
-                    DQ: s.dq,
-                    Updated: s.updated_at,
-                    Events: JSON.stringify(s.events),
-                    Performance: s.performance.join(" / "),
-                  }));
-                download(rows, format, "submissions");
-              })}
-              {state.submissions.map((s) => (
-                <details className="submission-detail" key={s.id}>
-                  <summary>
-                    <span>
-                      {
-                        state.competitors.find((c) => c.id === s.competitor_id)
-                          ?.name
-                      }
-                    </span>
-                    <span>Judge {s.slot}</span>
-                    <span>
-                      {s.finished ? "Finished" : "Draft"} · {fmt(s.total)}{" "}
-                      {s.dq ? "· DQ" : ""}
-                    </span>
-                  </summary>
+              ))}
+            </div>
+            {visibleSubmissions.map((s) => (
+              <details className="submission-detail" key={s.id}>
+                <summary>
+                  <span>
+                    {
+                      state.competitors.find((c) => c.id === s.competitor_id)
+                        ?.name
+                    }
+                  </span>
+                  <span>Judge {s.slot}</span>
+                  <span>
+                    {s.finished ? "Finished" : "Draft"}
+                    {s.dq ? " · DQ" : ""}
+                    {server ? ` · ${fmt(s.total)}` : ""}
+                  </span>
+                </summary>
+                {server && (
                   <div className="row-actions">
                     <button
                       disabled={demo}
@@ -1545,7 +1524,7 @@ export default function Page() {
                           title: s.finished
                             ? "Reopen this submission?"
                             : "Mark this submission finished?",
-                          body: "This administrative change is attributed to your account in the audit log.",
+                          body: "This change is recorded in the audit log.",
                           action: () => {
                             void api("review", {
                               id: s.id,
@@ -1568,7 +1547,7 @@ export default function Page() {
                           title: s.dq
                             ? "Remove DQ?"
                             : "Disqualify this submission?",
-                          body: "This changes the official scoring state and is recorded in the audit trail.",
+                          body: "This change is recorded in the audit log.",
                           action: () => {
                             void api("review", {
                               id: s.id,
@@ -1585,76 +1564,142 @@ export default function Page() {
                       {s.dq ? "Remove DQ" : "Disqualify"}
                     </button>
                   </div>
-                  <p>
-                    Account {s.user_id} · Revision {s.version} ·{" "}
-                    {new Date(s.updated_at).toLocaleString()}
-                  </p>
-                  {s.slot < 4
-                    ? s.events.map((e, i) => (
-                        <div className="detail-event" key={e.id}>
-                          <b>
-                            {i + 1}. {e.trick}
-                          </b>
-                          <span>
-                            L{e.level} ·{" "}
-                            {e.features.join(" + ") || "No features"}
-                          </span>
-                          <span>{fmt(e.value)} points</span>
-                          <time>{e.at}</time>
-                        </div>
-                      ))
-                    : categories.map((c, i) => (
-                        <div className="detail-event" key={c}>
-                          {c}
-                          <b>{s.performance[i]}</b>
-                        </div>
-                      ))}
-                </details>
-              ))}
-              {!state.submissions.length && (
-                <div className="empty-state">No submissions yet.</div>
-              )}
-              <h3 className="audit-title">Chronological audit trail</h3>
-              {!demo && !!state.audit?.length && (
-                <button
-                  style={{ margin: 20 }}
-                  onClick={async () => {
-                    try {
-                      const older = await api(
-                        `audit?before=${state.audit![state.audit!.length - 1].id}`,
-                      );
-                      if (!older.length) {
-                        setNotice("No earlier audit records.");
-                        return;
+                )}
+                <p>
+                  {new Date(s.updated_at).toLocaleString()}
+                  {s.submitted_at
+                    ? ` · Submitted ${new Date(s.submitted_at).toLocaleString()}`
+                    : ""}
+                </p>
+                {s.slot < 4
+                  ? s.events.map((e, i) => (
+                      <div className="detail-event" key={e.id}>
+                        <b>
+                          {i + 1}. {e.trick}
+                        </b>
+                        <span>
+                          {deductions.includes(e.trick)
+                            ? "Deduction"
+                            : `L${e.level} · ${e.features.join(" + ") || "No features"}`}
+                        </span>
+                        {server && <span>{fmt(e.value)} points</span>}
+                        <time>{new Date(e.at).toLocaleString()}</time>
+                      </div>
+                    ))
+                  : categories.map((c, i) => (
+                      <div className="detail-event" key={c}>
+                        <span>{c}</span>
+                        {server && <b>{s.performance[i].toFixed(1)}</b>}
+                      </div>
+                    ))}
+              </details>
+            ))}
+            {!visibleSubmissions.length && (
+              <div className="empty-state">No submissions yet.</div>
+            )}
+            {server && (
+              <>
+                <h3 className="audit-title">Audit history</h3>
+                {!demo && !!state.audit?.length && (
+                  <button
+                    style={{ margin: 20 }}
+                    onClick={async () => {
+                      try {
+                        const older = await api(
+                          `audit?before=${state.audit![state.audit!.length - 1].id}`,
+                        );
+                        if (!older.length) {
+                          setNotice("No earlier audit records.");
+                          return;
+                        }
+                        await commit({
+                          ...workspace,
+                          snapshot: {
+                            ...state,
+                            audit: [...state.audit!, ...older],
+                          },
+                        });
+                      } catch (e) {
+                        setSyncError((e as Error).message);
                       }
-                      await commit({
-                        ...workspace,
-                        snapshot: {
-                          ...state,
-                          audit: [...state.audit!, ...older],
-                        },
-                      });
-                    } catch (e) {
-                      setSyncError((e as Error).message);
+                    }}
+                  >
+                    Load earlier history
+                  </button>
+                )}
+                {(state.audit ?? []).map((a, i) => (
+                  <details className="audit" key={i}>
+                    <summary>
+                      {String(a.created_at)} · {String(a.action)} ·{" "}
+                      {String(a.user_id)}
+                    </summary>
+                    <pre>
+                      {JSON.stringify(
+                        { prior: a.prior, next: a.next },
+                        null,
+                        2,
+                      )}
+                    </pre>
+                  </details>
+                ))}
+              </>
+            )}
+          </section>
+        )}
+        {tab === "Admin" && (
+          <section className="panel records">
+            <div className="panel-heading">
+              <h3>Your score values</h3>
+            </div>
+            {exports((format, ranked) => {
+              const ordered = [...personalSubmissions].sort((a, b) =>
+                ranked
+                  ? (b.total ?? total(b)) - (a.total ?? total(a))
+                  : a.updated_at.localeCompare(b.updated_at),
+              );
+              download(
+                personalScoreExportRows(profile!, ordered, state.competitors),
+                format,
+                "my-scores",
+              );
+            })}
+            {personalSubmissions.map((s) => (
+              <details className="submission-detail" key={s.id}>
+                <summary>
+                  <span>
+                    {
+                      state.competitors.find((c) => c.id === s.competitor_id)
+                        ?.name
                     }
-                  }}
-                >
-                  Load earlier history
-                </button>
-              )}
-              {(state.audit ?? []).map((a, i) => (
-                <details className="audit" key={i}>
-                  <summary>
-                    {String(a.created_at)} · {String(a.action)} ·{" "}
-                    {String(a.user_id)}
-                  </summary>
-                  <pre>
-                    {JSON.stringify({ prior: a.prior, next: a.next }, null, 2)}
-                  </pre>
-                </details>
-              ))}
-            </section>
-          ))}
+                  </span>
+                  <span>
+                    {s.finished ? "Finished" : "Draft"}
+                    {s.dq ? " · DQ" : ""}
+                  </span>
+                  <span>Total {fmt(s.total ?? total(s))}</span>
+                </summary>
+                {s.slot < 4
+                  ? s.events.map((e, i) => (
+                      <div className="detail-event" key={e.id}>
+                        <span>
+                          {i + 1}. {e.trick}
+                        </span>
+                        <b>{fmt(e.value ?? eventScore(e))} points</b>
+                      </div>
+                    ))
+                  : categories.map((c, i) => (
+                      <div className="detail-event" key={c}>
+                        <span>{c}</span>
+                        <b>{s.performance[i].toFixed(1)}</b>
+                      </div>
+                    ))}
+              </details>
+            ))}
+            {!personalSubmissions.length && (
+              <div className="empty-state">No scores yet.</div>
+            )}
+          </section>
+        )}
         {tab === "Server Access Control" && server && (
           <div className="organizer">
             <section className="panel">
@@ -1838,7 +1883,9 @@ export default function Page() {
                       >
                         {p && !canEditJudge(p)
                           ? "Protected administrator"
-                          : p ? "Manage account" : "Assign judge"}
+                          : p
+                            ? "Manage account"
+                            : "Assign judge"}
                       </button>
                     </div>
                   );
@@ -2045,10 +2092,7 @@ export default function Page() {
         </Dialog>
       )}
       {keysOpen && (
-        <Dialog
-          title="Your keyboard, your workflow"
-          close={() => setKeysOpen(false)}
-        >
+        <Dialog title="Hotkeys" close={() => setKeysOpen(false)}>
           <p>
             Two-character shortcuts are pressed in sequence within 0.9 seconds.
             Shortcuts pause while typing in a field. Each binding must be

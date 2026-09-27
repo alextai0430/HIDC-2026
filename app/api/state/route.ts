@@ -1,4 +1,4 @@
-import { identity, protectedAccess, failure } from "@/lib/server";
+import { identity, failure } from "@/lib/server";
 import { eventScore, rankGlobal, total } from "@/lib/scoring";
 import { Submission } from "@/lib/model";
 import { canManage } from "@/lib/access";
@@ -6,14 +6,14 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   try {
     const { client, profile } = await identity(req);
-    const access = await protectedAccess(profile);
+    const fullAccess = canManage(profile);
     const { data: competitors, error } = await client
       .from("competitors")
       .select("*")
       .order("position");
     if (error) throw error;
     let query = client.from("submissions").select("*");
-    if (!access) query = query.eq("user_id", profile.id);
+    if (!fullAccess) query = query.eq("user_id", profile.id);
     const { data: subs, error: subError } = await query;
     if (subError) throw subError;
     const submissions = (subs ?? []) as Submission[];
@@ -45,19 +45,15 @@ export async function GET(req: Request) {
       divisions: divisionRows.data?.map((d) => d.name),
       profile,
       competitors,
-      protected: access,
+      protected: fullAccess,
       personal,
       submissions: submissions.map((s) => ({
         ...s,
-        ...(access
-          ? {
-              total: total(s),
-              events: s.events.map((e) => ({ ...e, value: eventScore(e) })),
-            }
-          : {}),
+        total: total(s),
+        events: s.events.map((e) => ({ ...e, value: eventScore(e) })),
       })),
     };
-    if (access) {
+    if (fullAccess) {
       const { data: audit } = await client
         .from("audit")
         .select("*")
@@ -65,7 +61,7 @@ export async function GET(req: Request) {
         .limit(250);
       result.audit = audit;
     }
-    if (canManage(profile)) {
+    if (fullAccess) {
       result.rankings = rankGlobal(competitors!, submissions);
       const profiles = (
         await client

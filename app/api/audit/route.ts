@@ -1,9 +1,9 @@
-import { identity, protectedAccess, failure } from "@/lib/server";
+import { identity, failure } from "@/lib/server";
+import { canManage } from "@/lib/access";
 export async function GET(req: Request) {
   try {
     const { client, profile } = await identity(req);
-    if (!(await protectedAccess(profile)))
-      throw new Error("Administrator unlock required");
+    if (!canManage(profile)) throw new Error("Administrator access required");
     const before = new URL(req.url).searchParams.get("before");
     if (!before || !/^\d+$/.test(before))
       throw new Error("Invalid audit cursor");

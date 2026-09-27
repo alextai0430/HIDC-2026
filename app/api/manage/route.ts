@@ -1,12 +1,11 @@
 import { z } from "zod";
 import { identity, failure } from "@/lib/server";
-import { adminProtectionEnabled, canManage, canEditJudge } from "@/lib/access";
+import { canManage, canEditJudge } from "@/lib/access";
 import { usernameSchema, internalAddress } from "@/lib/usernames";
 export async function POST(req: Request) {
   try {
     const { client, profile } = await identity(req);
-    if (!canManage(profile))
-      throw new Error("Server organizer access required");
+    if (!canManage(profile)) throw new Error("Administrator access required");
     const { action, data } = await req.json();
     if (["activate", "lock", "save"].includes(action)) {
       const parsed =
@@ -27,7 +26,7 @@ export async function POST(req: Request) {
         p_actor: profile.id,
         p_action: action,
         p_data: parsed,
-        p_development: !adminProtectionEnabled,
+        p_development: false,
       });
       if (error) throw new Error(error.message);
     } else if (action === "division") {

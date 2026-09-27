@@ -11,6 +11,12 @@ import {
   type LocalWorkspace,
 } from "../lib/local";
 import type { Profile, Submission } from "../lib/model";
+import {
+  detailExportRows,
+  detailSubmissions,
+  ownSubmissions,
+  personalScoreExportRows,
+} from "../lib/scoped";
 
 const alex: Profile = {
   id: crypto.randomUUID(),
@@ -35,11 +41,7 @@ const judges = [2, 3, 4, 5].map((slot) => ({
   slot,
   is_admin: false,
 }));
-const protectedPolicy = {
-  ...access,
-  adminProtectionEnabled: true,
-  canManage: (p: Profile) => access.canManage(p, true),
-};
+const protectedPolicy = { ...access };
 
 // Execute the real server/route code, replacing only external services. No live credentials or network.
 function load(file: string, overrides: Record<string, unknown>): any {
@@ -80,24 +82,28 @@ const request = (body: unknown, url = "http://localhost/api/test") =>
 
 test("administrator identity and judge scoring remain independent, including legacy cache profiles", async () => {
   for (const p of [alex, organizer]) {
-    assert.equal(access.canManage(p, true), true);
-    assert.equal(await server.protectedAccess(p), true);
+    assert.equal(access.canManage(p), true);
     assert.equal(access.canEditJudge(p), false);
   }
   assert.equal(access.isAssignedJudge(alex), true);
   assert.equal(alex.slot, 1);
   assert.equal(access.isAssignedJudge(organizer), false);
+  const serverJudge: Profile = {
+    ...alex,
+    role: "server_admin",
+    is_admin: false,
+  };
+  assert.equal(access.canManage(serverJudge), true);
+  assert.equal(access.isAssignedJudge(serverJudge), false);
   for (const p of judges) {
-    assert.equal(access.canManage(p, true), false);
-    assert.equal(await server.protectedAccess(p), false);
+    assert.equal(access.canManage(p), false);
     assert.equal(access.canEditJudge(p), true);
   }
-  assert.equal(access.canManage({ ...alex, is_admin: undefined }, true), false);
-  assert.equal(access.canManage({ ...alex, active: false }, true), false);
-  assert.equal(await server.protectedAccess({ ...alex, active: false }), false);
+  assert.equal(access.canManage({ ...alex, is_admin: undefined }), false);
+  assert.equal(access.canManage({ ...alex, active: false }), false);
 });
 
-test("actual protected routes reject judges 2–5 before database access", async () => {
+test("management, review, and audit reject judges 2–5 before database access", async () => {
   const client = new Proxy(
     {},
     {
@@ -249,7 +255,7 @@ test("normal account management cannot edit, deactivate, reassign or demote eith
   }
 });
 
-test("state endpoint returns global data only for administrators and own redacted scores for other judges", async () => {
+test("state endpoint returns only own numeric scores to judges and global data only to administrators", async () => {
   const competitor = {
     id: crypto.randomUUID(),
     name: "Test",
@@ -279,7 +285,15 @@ test("state endpoint returns global data only for administrators and own redacte
     dq: false,
     version: 1,
   }));
-  for (const p of profiles) {
+  const serverJudge: Profile = {
+    ...alex,
+    id: crypto.randomUUID(),
+    username: "serverjudge1",
+    role: "server_admin",
+    slot: 1,
+    is_admin: false,
+  };
+  for (const p of [...profiles, serverJudge]) {
     const client = {
       from(table: string) {
         let data: any[] =
@@ -307,7 +321,9 @@ test("state endpoint returns global data only for administrators and own redacte
       },
     };
     const response = await route("state", p, client).GET(
-      new Request("http://localhost/api/state"),
+      new Request(
+        `http://localhost/api/state?user_id=${alex.id}&include_all=true`,
+      ),
     );
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("Cache-Control"), "no-store");
@@ -323,13 +339,87 @@ test("state endpoint returns global data only for administrators and own redacte
       assert.equal(body.protected, false);
       assert.equal(body.submissions.length, 1);
       assert.equal(body.submissions[0].user_id, p.id);
-      assert.equal(body.submissions[0].total, undefined);
-      assert.equal(body.submissions[0].events[0].value, undefined);
+      assert.equal(body.submissions[0].total, p.slot! <= 3 ? 6 : 30);
+      assert.equal(body.submissions[0].events[0].value, 6);
       assert.equal(body.rankings, undefined);
       assert.equal(body.audit, undefined);
       assert.equal(body.profiles, undefined);
     }
   }
+});
+
+test("disabled unlock cannot turn a judge into a global administrator", async () => {
+  for (const judge of judges) {
+    const response = await route("unlock", judge, {}).POST(
+      request({ password: "anything" }),
+    );
+    assert.equal(response.status, 403);
+    assert.equal(access.canManage(judge), false);
+  }
+});
+
+test("detail and export scopes exclude other judges and numeric values for ordinary accounts", () => {
+  const competitor = {
+    id: crypto.randomUUID(),
+    name: "One",
+    division: "Individual Open",
+    position: 1,
+    status: "locked" as const,
+    archived: false,
+    dq: false,
+  };
+  const submission = (p: Profile): Submission => ({
+    id: crypto.randomUUID(),
+    competitor_id: competitor.id,
+    user_id: p.id,
+    slot: p.slot!,
+    events: [
+      {
+        id: crypto.randomUUID(),
+        trick: "T 3D",
+        level: 2,
+        features: ["T1"],
+        at: new Date().toISOString(),
+        value: 20.4,
+      },
+    ],
+    performance: [5, 4, 3, 2, 1, 0],
+    total: 20.4,
+    finished: true,
+    dq: false,
+    version: 1,
+    updated_at: new Date().toISOString(),
+  });
+  const records = [
+    submission(judges[0]),
+    submission(judges[1]),
+    submission(alex),
+  ];
+  for (const judge of judges) {
+    const visible = detailSubmissions(judge, records);
+    const own = ownSubmissions(judge, records);
+    assert.deepEqual(visible, own);
+    const exported = detailExportRows(judge, records, [competitor]);
+    assert.equal(exported.length, own.length);
+    const serialized = JSON.stringify(exported);
+    assert.doesNotMatch(serialized, /20\.4|"Total"|"Performance"|"value"/);
+    for (const other of records.filter((s) => s.user_id !== judge.id))
+      assert.ok(!serialized.includes(other.events[0].id));
+    const personalExport = personalScoreExportRows(judge, records, [
+      competitor,
+    ]);
+    assert.equal(personalExport.length, own.length);
+    assert.ok(personalExport.every((row) => row.Total === 20.4));
+    assert.ok(!JSON.stringify(personalExport).includes("judge1"));
+  }
+  assert.equal(detailSubmissions(alex, records).length, 3);
+  assert.equal(ownSubmissions(alex, records).length, 1);
+  assert.equal(personalScoreExportRows(alex, records, [competitor]).length, 1);
+  assert.equal(detailSubmissions(organizer, records).length, 3);
+  assert.equal(
+    personalScoreExportRows(organizer, records, [competitor]).length,
+    0,
+  );
 });
 
 test("admin judge creates six-character-password judges and edits ordinary accounts without granting admin", async () => {

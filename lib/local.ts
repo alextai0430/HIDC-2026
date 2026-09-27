@@ -10,8 +10,13 @@ export type LocalWorkspace = { snapshot: Snapshot; queue: Operation[] };
 export async function readLocal(
   user: string,
 ): Promise<LocalWorkspace | undefined> {
-  const value = await (await database()).get("workspaces", user);
-  return value ? sanitizeWorkspace(value) : undefined;
+  const db = await database();
+  const value = await db.get("workspaces", user);
+  if (!value) return undefined;
+  const safe = sanitizeWorkspace(value);
+  // Replace older cache entries that may predate the privacy boundary.
+  await db.put("workspaces", safe, user);
+  return safe;
 }
 export async function writeLocal(user: string, value: LocalWorkspace) {
   await (await database()).put("workspaces", sanitizeWorkspace(value), user);
