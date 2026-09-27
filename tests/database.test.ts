@@ -143,6 +143,95 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await db.exec(
     readFileSync("supabase/migrations/006_division_judges.sql", "utf8"),
   );
+  const beforePointConfigScores = (
+    await db.query("select * from submissions order by id")
+  ).rows;
+  await db.exec(
+    readFileSync("supabase/migrations/007_technical_point_configuration.sql", "utf8"),
+  );
+  const initialPointConfig = await db.query<{ revision: number; data_revision: number; t1d: string }>(
+    "select revision,data_revision,rules->'bases'->'T'->>'1D' as t1d from scoring_configuration where config_id='global'",
+  );
+  assert.equal(initialPointConfig.rows[0].revision, 1);
+  assert.equal(initialPointConfig.rows[0].data_revision, 1);
+  assert.equal(initialPointConfig.rows[0].t1d, "0.1");
+  await db.exec("set role authenticated");
+  await assert.rejects(
+    db.query("select * from scoring_configuration"),
+    /permission denied/,
+  );
+  await assert.rejects(
+    db.query(
+      "select update_scoring_configuration($1,1,1,'{}','{}')",
+      [user],
+    ),
+    /permission denied/,
+  );
+  await db.exec("reset role");
+  const updatedRules = (
+    await db.query<{ rules: Record<string, any> }>(
+      "select rules from scoring_configuration where config_id='global'",
+    )
+  ).rows[0].rules;
+  updatedRules.bases.T["1D"] = 3;
+  const pointImpact = {
+    technicalSubmissions: 1,
+    technicalEventValues: 2,
+    competitors: 1,
+    rankingDivisions: 1,
+    finalizedRankings: 0,
+  };
+  // A concurrent score-data write invalidates the impact snapshot before any rule changes.
+  await db.query("update submissions set updated_at=updated_at where user_id=$1", [user]);
+  await assert.rejects(
+    db.query(
+      "select update_scoring_configuration($1,1,1,$2,$3)",
+      [user, JSON.stringify(updatedRules), JSON.stringify(pointImpact)],
+    ),
+    /scoring data changed/i,
+  );
+  await assert.rejects(
+    db.query(
+      "select update_scoring_configuration($1,1,2,$2,$3)",
+      [other, JSON.stringify(updatedRules), JSON.stringify(pointImpact)],
+    ),
+    /access denied/,
+  );
+  const configUpdate = await db.query<{ result: Record<string, any> }>(
+    "select update_scoring_configuration($1,1,2,$2,$3) as result",
+    [user, JSON.stringify(updatedRules), JSON.stringify(pointImpact)],
+  );
+  assert.equal(configUpdate.rows[0].result.changed, true);
+  assert.equal(configUpdate.rows[0].result.revision, 2);
+  assert.equal(configUpdate.rows[0].result.data_revision, 2);
+  assert.equal(configUpdate.rows[0].result.rules.bases.T["1D"], 3);
+  await assert.rejects(
+    db.query(
+      "select update_scoring_configuration($1,1,2,$2,$3)",
+      [user, JSON.stringify(updatedRules), JSON.stringify(pointImpact)],
+    ),
+    /configuration changed/,
+  );
+  assert.deepEqual(
+    (await db.query("select * from submissions order by id")).rows,
+    beforePointConfigScores,
+    "configuration edits must not rewrite score selections or their attribution",
+  );
+  const configAudit = await db.query<{
+    action: string;
+    prior: Record<string, any>;
+    next: Record<string, any>;
+  }>(
+    "select action,prior,next from audit where action='scoring_configuration_update'",
+  );
+  assert.equal(configAudit.rows.length, 1);
+  assert.equal(configAudit.rows[0].prior.revision, 1);
+  assert.equal(configAudit.rows[0].prior.rules.bases.T["1D"], 0.1);
+  assert.equal(configAudit.rows[0].next.revision, 2);
+  assert.equal(configAudit.rows[0].next.rules.bases.T["1D"], 3);
+  assert.deepEqual(configAudit.rows[0].next.affected_rules, ["base:T:1D"]);
+  assert.equal(configAudit.rows[0].next.recalculation.performed, true);
+  assert.equal(configAudit.rows[0].next.recalculation.mode, "derived_on_read");
   const avatarSchema = await db.query<{ avatar_path: string | null }>(
     "select avatar_path from profiles limit 1",
   );
@@ -176,7 +265,7 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     beforeOps,
   );
   assert.deepEqual(
-    (await db.query("select * from audit order by id")).rows,
+    (await db.query("select * from audit where action <> 'scoring_configuration_update' order by id")).rows,
     beforeAudit,
   );
   await invoke(op, 0); // An acknowledged pre-upgrade operation still deduplicates.

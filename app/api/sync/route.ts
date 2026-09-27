@@ -2,6 +2,7 @@ import { isAssignedJudge } from "@/lib/access";
 import { z } from "zod";
 import { identity, failure } from "@/lib/server";
 import { tricks, deductions } from "@/lib/model";
+import { loadScoringConfiguration } from "@/lib/scoring-config";
 const op = z.object({
   id: z.string().uuid(),
   competitor_id: z.string().uuid(),
@@ -56,7 +57,11 @@ export async function POST(req: Request) {
       p_payload: payload,
     });
     if (error) throw new Error(error.message);
-    return Response.json(data);
+    const scoringConfiguration = await loadScoringConfiguration(client);
+    return Response.json({
+      ...(data && typeof data === "object" ? data : { ok: true }),
+      scoringConfigRevision: scoringConfiguration.revision,
+    });
   } catch (e) {
     return failure(e);
   }

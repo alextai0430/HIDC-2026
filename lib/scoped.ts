@@ -4,7 +4,6 @@ import {
   type Profile,
   type Submission,
 } from "./model";
-import { eventScore, total } from "./scoring";
 import { canManage } from "./access";
 
 export function ownSubmissions(profile: Profile, submissions: Submission[]) {
@@ -32,13 +31,13 @@ export function detailExportRows(
     Updated: s.updated_at,
     Events: JSON.stringify(
       s.events.map((e) =>
-        revealOwnPoints
-          ? { ...e, value: e.value ?? eventScore(e) }
+        revealOwnPoints && e.value !== undefined
+          ? { ...e, value: e.value }
           : { trick: e.trick, level: e.level, features: e.features, at: e.at },
       ),
     ),
     ...(revealOwnPoints
-      ? { Total: s.total ?? total(s), Performance: s.performance.join(" / ") }
+      ? { Total: s.total, Performance: s.performance.join(" / ") }
       : {}),
   }));
 }
@@ -51,13 +50,13 @@ export function personalScoreExportRows(
   return ownSubmissions(profile, submissions).map((s) => ({
     Competitor: competitors.find((c) => c.id === s.competitor_id)?.name,
     Status: s.finished ? "Finished" : "Draft",
-    Total: s.total ?? total(s),
+    Total: s.total ?? "—",
     ...(s.slot < 4
       ? {
           Events: JSON.stringify(
             s.events.map((e) => ({
               trick: e.trick,
-              points: e.value ?? eventScore(e),
+              points: e.value ?? "—",
             })),
           ),
         }

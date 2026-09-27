@@ -33,6 +33,7 @@ import {
   canEditJudge,
   isAssignedJudge,
   isAdministrator,
+  canManageScoringConfiguration,
 } from "@/lib/access";
 import { api, demo, supabase } from "@/lib/supabase";
 import { applyLocal, clearLocal, LocalWorkspace, readLocal, sanitizeWorkspace, writeLocal } from "@/lib/local";
@@ -49,13 +50,13 @@ import {
   tricks,
 } from "@/lib/model";
 import { download } from "@/lib/export";
+import TechnicalPointConfiguration from "@/app/components/technical-point-configuration";
 import {
   detailExportRows,
   detailSubmissions,
   ownSubmissions,
   personalScoreExportRows,
 } from "@/lib/scoped";
-import { eventScore, total } from "@/lib/scoring";
 
 const defaultKeys: Record<string, string> = {
   submit: "Enter",
@@ -164,6 +165,7 @@ export default function Page() {
     [online, setOnline] = useState(true),
     [syncing, setSyncing] = useState(false),
     [syncError, setSyncError] = useState(""),
+    [scoringReconciliationNotice, setScoringReconciliationNotice] = useState(""),
     [notice, setNotice] = useState(""),
     [tab, setTab] = useState("Technical"),
     [technicalViewSlot, setTechnicalViewSlot] = useState(1),
@@ -217,6 +219,7 @@ export default function Page() {
   const state = workspace?.snapshot;
   const profile = state?.profile;
   const server = !!profile && canManage(profile);
+  const canManageScoringConfig = !!profile && canManageScoringConfiguration(profile);
   const organizer = profile?.role === "server_admin";
   const technical = (profile?.slot ?? 1) <= 3;
   const canViewPoints =
@@ -285,6 +288,9 @@ export default function Page() {
   const nextUpcoming = [...(state?.competitors ?? [])]
     .filter((c) => c.status === "upcoming" && !c.archived)
     .sort((a, b) => a.position - b.position)[0];
+  const oldestQueuedConfigRevision = workspace?.queue.length
+    ? Math.min(...workspace.queue.map((op) => op.scoring_config_revision ?? state?.scoringConfigRevision ?? 1))
+    : undefined;
   const progressRows = [...(state?.competitors ?? [])]
     .filter((c) => !c.archived)
     .sort((a, b) => a.position - b.position)
@@ -413,7 +419,13 @@ export default function Page() {
     try {
       while (ref.current?.queue.length) {
         const entry = ref.current.queue[0];
-        await api("sync", entry);
+        const result = await api("sync", entry);
+        const clientRevision = entry.scoring_config_revision ?? ref.current?.snapshot.scoringConfigRevision ?? 1;
+        if (Number(result.scoringConfigRevision) > clientRevision) {
+          setScoringReconciliationNotice(
+            `An offline score selection from configuration v${clientRevision} was synced using current rules v${result.scoringConfigRevision}.`,
+          );
+        }
         chain.current = chain.current.then(async () => {
           if (ref.current)
             await commit({
@@ -597,6 +609,7 @@ export default function Page() {
           expected_version: s?.version ?? 0,
           kind,
           payload,
+          scoring_config_revision: latest.snapshot.scoringConfigRevision ?? 1,
         };
         const snapshot = applyLocal(latest.snapshot, op);
         await commit({ snapshot, queue: demo ? [] : [...latest.queue, op] });
@@ -1235,6 +1248,12 @@ export default function Page() {
           JUDGE CONSOLE <b>2026</b>
         </span>
       </nav>
+      {scoringReconciliationNotice ? (
+        <div className="point-sync-reconciliation" role="status">
+          <span>{scoringReconciliationNotice}</span>
+          <button type="button" aria-label="Dismiss scoring configuration notice" onClick={() => setScoringReconciliationNotice("")}>Dismiss</button>
+        </div>
+      ) : null}
       {demo && (
         <div className="demo-bar">
           <span>
@@ -1475,7 +1494,7 @@ export default function Page() {
                           </div>
                         <span className="event-points" aria-label="Event points">
                           {canViewPoints
-                            ? fmt(event.value ?? eventScore(event))
+                            ? event.value === undefined ? "***" : fmt(event.value)
                             : "***"}
                         </span>
                           <button
@@ -1506,7 +1525,7 @@ export default function Page() {
                   <div className="sequence-footer">
                     <Shield size={15} />
                     <span>Technical total</span>
-                    <b>{canViewPoints ? fmt(displayed?.total ?? (displayed ? total(displayed) : null)) : "***"}</b>
+                    <b>{canViewPoints && displayed?.total !== undefined ? fmt(displayed.total) : "***"}</b>
                   </div>
                 </aside>
                 <div className="scoring-controls">
@@ -1982,7 +2001,7 @@ export default function Page() {
                     {s.finished ? "Finished" : "Draft"}
                     {s.dq ? " · DQ" : ""}
                     {canViewPoints
-                      ? ` · Total ${fmt(s.total ?? total(s))}`
+                      ? ` · Total ${s.total === undefined ? "***" : fmt(s.total)}`
                       : " · Total ***"}
                   </span>
                 </summary>
@@ -2053,7 +2072,7 @@ export default function Page() {
                             ? "Deduction"
                             : `L${e.level} · ${e.features.join(" + ") || "No features"}`}
                         </span>
-                        <span>{canViewPoints ? `${fmt(e.value ?? eventScore(e))} points` : "*** points"}</span>
+                        <span>{canViewPoints && e.value !== undefined ? `${fmt(e.value)} points` : "*** points"}</span>
                         <time>{new Date(e.at).toLocaleString()}</time>
                       </div>
                     ))
@@ -2183,7 +2202,7 @@ export default function Page() {
             {canViewPoints && exports((format, ranked) => {
               const ordered = [...personalSubmissions].sort((a, b) =>
                 ranked
-                  ? (b.total ?? total(b)) - (a.total ?? total(a))
+                  ? (b.total ?? 0) - (a.total ?? 0)
                   : a.updated_at.localeCompare(b.updated_at),
               );
               download(
@@ -2205,7 +2224,7 @@ export default function Page() {
                     {s.finished ? "Finished" : "Draft"}
                     {s.dq ? " · DQ" : ""}
                   </span>
-                  <span>Total {canViewPoints ? fmt(s.total ?? total(s)) : "***"}</span>
+                  <span>Total {canViewPoints && s.total !== undefined ? fmt(s.total) : "***"}</span>
                 </summary>
                 {s.slot < 4
                   ? s.events.map((e, i) => (
@@ -2213,7 +2232,7 @@ export default function Page() {
                         <span>
                           {i + 1}. {e.trick}
                         </span>
-                        <b>{canViewPoints ? `${fmt(e.value ?? eventScore(e))} points` : "*** points"}</b>
+                        <b>{canViewPoints && e.value !== undefined ? `${fmt(e.value)} points` : "*** points"}</b>
                       </div>
                     ))
                   : categories.map((c, i) => (
@@ -2378,6 +2397,19 @@ export default function Page() {
                 </div>
               </div>
             </section>
+            {canManageScoringConfig && adminUnlocked && adminUnlockToken ? (
+              <TechnicalPointConfiguration
+                adminUnlockToken={adminUnlockToken}
+                queuedActions={workspace?.queue.length ?? 0}
+                oldestQueuedRevision={oldestQueuedConfigRevision}
+                onSaved={() => {
+                  if (workspace?.queue.length) {
+                    setScoringReconciliationNotice("Pending offline score selections will be calculated with the updated rules when they sync.");
+                  }
+                  void refresh();
+                }}
+              />
+            ) : null}
             <section className="panel records">
               <div className="panel-heading">
                 <h3>Competitor roster</h3>

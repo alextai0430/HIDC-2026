@@ -8,6 +8,12 @@ export function isAdministrator(profile: Profile) {
 export function canManage(profile: Profile) {
   return isAdministrator(profile);
 }
+export function canManageScoringConfiguration(profile: Profile) {
+  return (
+    isAdministrator(profile) &&
+    ["organizer", "alexandertai"].includes(profile.username?.toLowerCase() ?? "")
+  );
+}
 export function canEditJudge(profile: Profile) {
   return profile.role === "judge" && !isAdministrator(profile);
 }

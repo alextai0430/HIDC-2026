@@ -65,6 +65,17 @@ export type Event = {
   at: string;
   value?: number;
 };
+export type ScoringRules = {
+  bases: Record<string, Record<string, number>>;
+  deductions: Record<string, number>;
+  levels: Record<string, number>;
+  features: Record<string, number>;
+};
+export type ScoringConfiguration = {
+  revision: number;
+  dataRevision: number;
+  rules: ScoringRules;
+};
 export type Submission = {
   id: string;
   competitor_id: string;
@@ -85,6 +96,9 @@ export type Operation = {
   expected_version: number;
   kind: "put_event" | "delete_event" | "performance" | "finish" | "dq";
   payload: Record<string, unknown>;
+  // Revision used when this offline action was created. The event itself
+  // stores only selections; the server scores it with the current rules.
+  scoring_config_revision?: number;
 };
 export type Snapshot = {
   profile: Profile;
@@ -99,6 +113,8 @@ export type Snapshot = {
   assignments?: { division: string; slot: number; user_id: string }[];
   // True only when the server accepted this page's in-memory Admin unlock token.
   pointAccess?: boolean;
+  // Safe non-numeric version metadata; used to flag stale offline queues.
+  scoringConfigRevision?: number;
 };
 export type Ranking = {
   competitor: Competitor;

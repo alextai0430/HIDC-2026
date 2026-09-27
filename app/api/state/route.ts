@@ -4,12 +4,14 @@ import { Submission } from "@/lib/model";
 import { canManage } from "@/lib/access";
 import { sanitizeAuditRows } from "@/lib/audit";
 import { requestHasAdminUnlock } from "@/lib/admin-unlock";
+import { loadScoringConfiguration } from "@/lib/scoring-config";
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   try {
     const { client, profile } = await identity(req);
     const fullAccess = canManage(profile);
     const revealPoints = requestHasAdminUnlock(req, profile.id);
+    const scoringConfiguration = await loadScoringConfiguration(client);
     const { data: allCompetitors, error } = await client
       .from("competitors")
       .select("*")
@@ -36,7 +38,7 @@ export async function GET(req: Request) {
     const personal = own.map((s) => ({
       competitor_id: s.competitor_id,
       rank: 1,
-      ...(revealPoints && s.slot > 3 ? { total: total(s) } : {}),
+      ...(revealPoints && s.slot > 3 ? { total: total(s, scoringConfiguration.rules) } : {}),
     }));
     for (const division of new Set(allCompetitors!.map((c) => c.division))) {
       const sorted = own
@@ -45,7 +47,7 @@ export async function GET(req: Request) {
             allCompetitors!.find((c) => c.id === s.competitor_id)?.division ===
             division,
         )
-        .sort((a, b) => Number(a.dq) - Number(b.dq) || total(b) - total(a));
+        .sort((a, b) => Number(a.dq) - Number(b.dq) || total(b, scoringConfiguration.rules) - total(a, scoringConfiguration.rules));
       sorted.forEach((s, i) => {
         personal.find((p) => p.competitor_id === s.competitor_id)!.rank = i + 1;
       });
@@ -80,6 +82,7 @@ export async function GET(req: Request) {
       competitors,
       protected: fullAccess,
       pointAccess: revealPoints,
+      scoringConfigRevision: scoringConfiguration.revision,
       personal,
       submissions: submissions.map((s) => {
         if (!revealPoints) {
@@ -88,8 +91,8 @@ export async function GET(req: Request) {
         }
         return {
           ...s,
-          total: total(s),
-          events: s.events.map((e) => ({ ...e, value: eventScore(e) })),
+          total: total(s, scoringConfiguration.rules),
+          events: s.events.map((e) => ({ ...e, value: eventScore(e, scoringConfiguration.rules) })),
         };
       }),
       assignments,
@@ -111,6 +114,7 @@ export async function GET(req: Request) {
               "finish",
               "dq",
               "admin_review",
+              "scoring_configuration_update",
             ].includes(row.action)
               ? { ...row, prior: { redacted: true }, next: { redacted: true } }
               : row,
@@ -118,7 +122,7 @@ export async function GET(req: Request) {
     }
     if (fullAccess) {
       if (revealPoints)
-        result.rankings = rankGlobal(allCompetitors!, submissions);
+        result.rankings = rankGlobal(allCompetitors!, submissions, scoringConfiguration.rules);
       result.competitors = allCompetitors;
       let roster: any = await client
         .from("profiles")

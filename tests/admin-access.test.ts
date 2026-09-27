@@ -17,6 +17,7 @@ import {
   type LocalWorkspace,
 } from "../lib/local";
 import type { Profile, Submission } from "../lib/model";
+import { DEFAULT_SCORING_RULES } from "../lib/scoring-config";
 import {
   detailExportRows,
   detailSubmissions,
@@ -255,6 +256,19 @@ test("Judge 1 submits technical scores with unchanged attribution; backup organi
       calls.push(args);
       return { data: { ok: true } };
     },
+    from: (table: string) => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: async () => ({
+          data: table === "scoring_configuration"
+            ? { revision: 1, rules: DEFAULT_SCORING_RULES }
+            : null,
+          error: null,
+        }),
+      };
+      return builder;
+    },
   };
   const body = {
     id: crypto.randomUUID(),
@@ -382,7 +396,7 @@ test("state endpoint masks score data until unlock and only returns own judge po
     name: "Test",
     division: "Individual Open",
     position: 1,
-    status: "active",
+    status: "active" as const,
     archived: false,
     dq: false,
   };
@@ -396,6 +410,8 @@ test("state endpoint masks score data until unlock and only returns own judge po
     dq: false,
   };
   const profiles = [alex, ...judges, organizer];
+  const liveRules = structuredClone(DEFAULT_SCORING_RULES);
+  liveRules.bases.T["3D"] = 9;
   const submissions = [alex, ...judges].map((p) => ({
     id: crypto.randomUUID(),
     competitor_id: competitor.id,
@@ -446,11 +462,18 @@ test("state endpoint masks score data until unlock and only returns own judge po
                   }))
                 : table === "audit"
                   ? [{ action: "put_event", prior: { value: 5 }, next: { value: 6 } }]
+                  : table === "scoring_configuration"
+                    ? [{ config_id: "global", revision: 2, data_revision: 9, rules: liveRules }]
                   : [{ name: "Individual Open" }];
         const builder: any = {
           select: () => builder,
           order: () => builder,
           limit: () => builder,
+          maybeSingle: async () => ({ data: data[0] ?? null, error: null }),
+          lte: (field: string, value: unknown) => {
+            data = data.filter((row) => row[field] <= Number(value));
+            return builder;
+          },
           eq: (field: string, value: unknown) => {
             data = data.filter((row) => row[field] === value);
             return builder;
@@ -519,16 +542,28 @@ test("state endpoint masks score data until unlock and only returns own judge po
     assert.equal(unlocked.status, 200);
     const visibleBody = await unlocked.json();
     assert.equal(visibleBody.pointAccess, true);
+    for (const saved of visibleBody.submissions.filter((row: any) => row.slot <= 3)) {
+      assert.equal(saved.total, 9);
+      assert.equal(saved.events[0].value, 9);
+    }
+    const ownExport = personalScoreExportRows(p, visibleBody.submissions, [competitor]);
+    if (p.slot !== null && p.slot <= 3 && ownExport.length > 0) {
+      const technicalExport = ownExport[0];
+      assert.ok("Events" in technicalExport);
+      assert.equal(technicalExport.Total, 9);
+      assert.equal(JSON.parse(technicalExport.Events)[0].points, 9);
+    }
     if (access.isAdministrator(p)) {
       assert.equal(visibleBody.submissions.length, 5);
-      assert.equal(visibleBody.submissions[0].total, 6);
+      assert.equal(visibleBody.submissions[0].total, 9);
       assert.equal(visibleBody.rankings.length, 2);
+      assert.equal(visibleBody.rankings[0].technical[0], 9);
       assert.equal(visibleBody.audit.length, 1);
     } else {
       assert.equal(visibleBody.submissions.length, 1);
       assert.equal(visibleBody.submissions[0].user_id, p.id);
-      assert.equal(visibleBody.submissions[0].total, p.slot! <= 3 ? 6 : 30);
-      assert.equal(visibleBody.submissions[0].events[0].value, 6);
+      assert.equal(visibleBody.submissions[0].total, p.slot! <= 3 ? 9 : 30);
+      assert.equal(visibleBody.submissions[0].events[0].value, 9);
       assert.equal(visibleBody.rankings, undefined);
       assert.equal(visibleBody.audit, undefined);
     }
@@ -537,6 +572,166 @@ test("state endpoint masks score data until unlock and only returns own judge po
     if (previousSigningSecret === undefined)
       delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     else process.env.SUPABASE_SERVICE_ROLE_KEY = previousSigningSecret;
+  }
+});
+
+test("technical point configuration requires the allowlist and active Admin unlock, then previews before updating", async () => {
+  const originalSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "unit-test-signing-secret-0123456789abcdef";
+  try {
+    const competitor = {
+      id: crypto.randomUUID(),
+      name: "Toss test",
+      division: "Individual Open",
+      position: 1,
+      status: "locked" as const,
+      dq: false,
+      archived: false,
+    };
+    const savedEvent = {
+      id: crypto.randomUUID(),
+      trick: "T 1D",
+      level: 1,
+      features: [],
+      at: new Date().toISOString(),
+    };
+    const submission: Submission = {
+      id: crypto.randomUUID(),
+      competitor_id: competitor.id,
+      user_id: alex.id,
+      slot: 1,
+      events: [savedEvent],
+      performance: [],
+      finished: true,
+      dq: false,
+      version: 1,
+      updated_at: new Date().toISOString(),
+    };
+    let config = { revision: 1, rules: structuredClone(DEFAULT_SCORING_RULES) };
+    const rpcCalls: unknown[][] = [];
+    const client = {
+      from(table: string) {
+        let data: any[] = table === "scoring_configuration"
+          ? [{ config_id: "global", ...config }]
+          : table === "submissions"
+            ? [submission]
+            : table === "competitors"
+              ? [competitor]
+              : [];
+        const builder: any = {
+          select: () => builder,
+          eq: (field: string, value: unknown) => {
+            data = data.filter((row) => row[field] === value);
+            return builder;
+          },
+          lte: (field: string, value: number) => {
+            data = data.filter((row) => row[field] <= value);
+            return builder;
+          },
+          order: () => builder,
+          maybeSingle: async () => ({ data: data[0] ?? null, error: null }),
+          then: (resolve: (result: unknown) => unknown, reject: (reason: unknown) => unknown) =>
+            Promise.resolve({ data, error: null }).then(resolve, reject),
+        };
+        return builder;
+      },
+      rpc: async (name: string, args: Record<string, any>) => {
+        rpcCalls.push([name, args]);
+        config = { revision: config.revision + 1, rules: args.p_rules };
+        return {
+          data: {
+            changed: true,
+            revision: config.revision,
+            rules: config.rules,
+            impact: args.p_impact,
+          },
+          error: null,
+        };
+      },
+    };
+    const handlers = route("scoring-configuration", alex, client);
+    const withoutUnlock = await handlers.GET(new Request("http://localhost/api/scoring-configuration"));
+    assert.equal(withoutUnlock.status, 403);
+
+    for (const account of [alex, organizer]) {
+      const token = createAdminUnlockToken(account.id);
+      const response = await route("scoring-configuration", account, client).GET(
+        new Request("http://localhost/api/scoring-configuration", {
+          headers: { "x-hidc-admin-unlock": token },
+        }),
+      );
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).revision, 1);
+    }
+    for (const account of [...judges, { ...alex, username: "serverjudge1", role: "server_admin" as const }]) {
+      const token = createAdminUnlockToken(account.id);
+      const response = await route("scoring-configuration", account, client).GET(
+        new Request("http://localhost/api/scoring-configuration", {
+          headers: { "x-hidc-admin-unlock": token },
+        }),
+      );
+      assert.equal(response.status, 403);
+    }
+
+    const token = createAdminUnlockToken(alex.id);
+    const rules = structuredClone(DEFAULT_SCORING_RULES);
+    rules.bases.T["1D"] = 3;
+    const previewResponse = await route("scoring-configuration", alex, client).POST(
+      new Request("http://localhost/api/scoring-configuration", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token },
+        body: JSON.stringify({ action: "preview", expectedRevision: 1, rules }),
+      }),
+    );
+    assert.equal(previewResponse.status, 200);
+    const preview = await previewResponse.json();
+    assert.deepEqual(preview.impact, {
+      technicalSubmissions: 1,
+      technicalEventValues: 1,
+      competitors: 1,
+      rankingDivisions: 1,
+      finalizedRankings: 0,
+    });
+    assert.equal(rpcCalls.length, 0, "preview/cancel must not write scoring rules");
+
+    const missingConfirmation = await route("scoring-configuration", alex, client).POST(
+      new Request("http://localhost/api/scoring-configuration", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token },
+        body: JSON.stringify({
+          action: "update",
+          expectedRevision: 1,
+          expectedDataRevision: preview.dataRevision,
+          rules,
+          impact: preview.impact,
+          confirmation: "",
+        }),
+      }),
+    );
+    assert.equal(missingConfirmation.status, 400);
+    assert.equal(rpcCalls.length, 0);
+
+    const confirmed = await route("scoring-configuration", alex, client).POST(
+      new Request("http://localhost/api/scoring-configuration", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token },
+        body: JSON.stringify({
+          action: "update",
+          expectedRevision: 1,
+          expectedDataRevision: preview.dataRevision,
+          rules,
+          impact: preview.impact,
+          confirmation: "UPDATE POINT VALUES",
+        }),
+      }),
+    );
+    assert.equal(confirmed.status, 200, JSON.stringify(await confirmed.json()));
+    assert.equal(rpcCalls.length, 1);
+    assert.equal(config.revision, 2);
+    assert.deepEqual(submission.events, [savedEvent], "rule changes preserve score selections and timestamps");
+  } finally {
+    if (originalSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSecret;
   }
 });
 
