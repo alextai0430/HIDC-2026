@@ -81,7 +81,7 @@ npm run build
 npm start
 ```
 
-Set the variables above in the hosting provider's environment settings before building. For a real competition set bypass false. The retained admin-protection flag no longer changes permissions; account flags do. Use HTTPS. Point every judge laptop at the same URL and Supabase project. `npm start` binds to loopback for local testing; on a self-hosted server use `npx next start --hostname 0.0.0.0` behind an HTTPS reverse proxy. The project is deployed through the existing private GitHub repository and Vercel project. No live Supabase credentials are bundled with this repository.
+Set the variables above in the hosting provider's environment settings before building. For a real competition set bypass false. The retained admin-protection flag no longer changes permissions; account flags do. Use HTTPS. Point every judge laptop at the same URL and Supabase project. `npm start` binds to loopback for local testing; on a self-hosted server use `npx next start --hostname 0.0.0.0` behind an HTTPS reverse proxy. The project is deployed through the public GitHub repository and Vercel project. No live Supabase credentials are bundled with this repository.
 
 ## Verification
 
@@ -105,7 +105,7 @@ Offline writes are sanitized at the IndexedDB boundary for every account: only t
 
 ### Existing live installation
 
-Migration 004 has already been applied and verified in project `msmdzuprjankfsgdozed`: alexandertai is still Judge 1 with `is_admin=true`, organizer remains the backup administrator, judges 2–5 have `is_admin=false`, and existing profile UUIDs and slots are unchanged. Do not rerun migrations 001–004 or blindly run `supabase db push`. Commit only reviewed source, tests and documentation to the existing private repository; `.env.local`, ZIP archives and credentials must stay out of Git. A push to the connected production branch can start a Vercel deployment, so review and test first.
+Migration 004 has already been applied and verified in project `msmdzuprjankfsgdozed`: alexandertai is still Judge 1 with `is_admin=true`, organizer remains the backup administrator, judges 2–5 have `is_admin=false`, and existing profile UUIDs and slots are unchanged. Do not rerun migrations 001–004 or blindly run `supabase db push`. Commit only reviewed source, tests and documentation to the public repository; `.env.local`, ZIP archives and credentials must stay out of Git. A push to the connected production branch can start a Vercel deployment, so review and test first.
 
 Before contest use, test separate sessions for an ordinary technical judge, ordinary performance judge, alexandertai and organizer. Check Score Details, Admin, Server Access Control, global rankings, technical/performance slot selectors, exports, direct API access, offline queue and synchronization. Keep venue Wi-Fi reliable and rehearse with all five judges.
 
