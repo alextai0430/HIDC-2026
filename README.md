@@ -14,11 +14,11 @@ npm run dev
 
 Open http://127.0.0.1:3000. The demo account selector previews all five judge slots and the organizer. Demo scoring and roster changes are local to each demo account on this browser. They do not sync to other laptops. The demo does not create real Auth users or connect to event data. Local demo results are provisional and are not official event results. A connected Supabase installation enables those workflows.
 
-## Multi-computer development (recommended)
+## Fileless local development
 
-Use a separate Supabase development project for development and rehearsal. Do not point local development at the production project: development changes, test accounts, and sample scores must not share the event database. This repository's local launcher explicitly refuses the known production Supabase project. Creating a development project, applying migrations, or copying data is a separate manual task; this guide does not change any database.
+This project currently uses one Supabase database for both the deployed app and local development. Local scoring, account changes, and competitor changes affect the live event database. Use existing accounts and avoid test submissions or destructive changes while connected. The launcher warns when connected to the live project. Do not rerun migrations 001–004 on the existing project.
 
-In the existing Vercel project settings, add these variables for the **Development** environment only, using credentials from the separate development Supabase project:
+In the existing Vercel project settings, add these variables for the **Development** environment only, using the existing Supabase project's credentials:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
@@ -37,13 +37,14 @@ npx --yes vercel@54.17.3 login
 npx --yes vercel@54.17.3 link
 npm run dev:vercel:check
 npm run dev:vercel
+npm run build:vercel
 ```
 
-During `vercel link`, select the account/team and **existing Vercel project** that serves `hidc-2026.vercel.app`. If it is not listed, cancel and ask the project owner to grant access; do not create a duplicate project. The Vercel login token is saved in that computer's user configuration, and the project link is saved under ignored `.vercel/`; never copy either between computers or commit them.
+During `vercel link`, select the account/team and **existing Vercel project** that serves `hidc-2026.vercel.app`. If it is not listed, cancel and ask the project owner to grant access; do not create a duplicate project. The Vercel login token is saved in that computer's user configuration, and the project link is saved under ignored `.vercel/`; never copy either between computers or commit them. `build:vercel` builds with the same Development variables after `dev:vercel:check` passes.
 
-Vercel's `env run` passes configured values directly to the process without writing an env file. Do not use `vercel env pull` or `vercel pull` for this workflow because those commands can create local environment files/cache. The launcher also filters inherited Vercel settings, masks keys found in existing `.env*` files from Next.js, checks auth bypass is off, and checks service-key/project consistency without printing values. Leave `.env.local` untouched until you have verified the separate development project and this workflow on your computer; once verified, you may remove that file yourself if it is no longer needed.
+Vercel's `env run` passes configured values directly to the process without writing an env file. Do not use `vercel env pull` or `vercel pull` for this workflow because those commands can create local environment files/cache. The launcher also filters inherited Vercel settings, masks keys found in existing `.env*` files from Next.js, checks auth bypass is off, and checks service-key/project consistency without printing values. Leave `.env.local` untouched until you have verified this workflow on your computer; once verified, you may remove that file if it is no longer needed.
 
-For daily use, run `git pull --ff-only origin main`, then `npm ci` if package files changed, then `npm run dev:vercel`. Work on a feature branch and review changes before pushing: pushes to the connected production branch may trigger a production deployment. This setup does not push, deploy, or modify any Vercel or Supabase settings automatically.
+For daily use, update the branch you are working on, then run `npm ci` if package files changed and `npm run dev:vercel`. Work on a feature branch and review changes before pushing: pushes to the connected production branch may trigger a production deployment. The local launcher does not push, deploy, or modify any Vercel or Supabase settings automatically.
 
 ## Connect the real event
 

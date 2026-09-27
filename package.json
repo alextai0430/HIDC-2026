@@ -6,6 +6,7 @@
     "dev": "next dev --hostname 127.0.0.1",
     "dev:vercel": "npx --yes vercel@54.17.3 env run -e development -- node scripts/dev-vercel.mjs",
     "dev:vercel:check": "npx --yes vercel@54.17.3 env run -e development -- node scripts/dev-vercel.mjs --check",
+    "build:vercel": "npx --yes vercel@54.17.3 env run -e development -- npm run build",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",

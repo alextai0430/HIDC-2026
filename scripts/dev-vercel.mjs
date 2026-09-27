@@ -10,7 +10,7 @@ const allowedAppKeys = [
   "SUPABASE_SERVICE_ROLE_KEY",
   "NEXT_PUBLIC_BYPASS_AUTH",
 ];
-const productionProjectRef = "msmdzuprjankfsgdozed";
+const liveProjectRef = "msmdzuprjankfsgdozed";
 const errors = [];
 
 for (const key of allowedAppKeys) {
@@ -25,9 +25,6 @@ try {
     errors.push("NEXT_PUBLIC_SUPABASE_URL must be an HTTPS Supabase project URL.");
   } else {
     projectRef = parsed.hostname.split(".")[0];
-    if (projectRef === productionProjectRef) {
-      errors.push("Development is blocked from using the known production Supabase project. Configure a separate development project first.");
-    }
   }
 } catch {
   if (supabaseUrl) errors.push("NEXT_PUBLIC_SUPABASE_URL must be a valid HTTPS Supabase project URL.");
@@ -68,8 +65,10 @@ if (errors.length) {
   for (const error of errors) console.error(error);
   process.exitCode = 1;
 } else if (process.argv.includes("--check")) {
+  if (projectRef === liveProjectRef) console.warn("Development is connected to the live HIDC database. Scoring and admin actions will affect production data.");
   console.log("Vercel Development environment checks passed. No variable values were displayed.");
 } else {
+  if (projectRef === liveProjectRef) console.warn("Connected to the live HIDC database. Scoring and admin actions will affect production data.");
   const childEnv = {};
   const inheritedKeys = [
     "PATH", "PATHEXT", "SystemRoot", "WINDIR", "ComSpec", "TEMP", "TMP",
