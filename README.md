@@ -14,16 +14,45 @@ npm run dev
 
 Open http://127.0.0.1:3000. The demo account selector previews all five judge slots and the organizer. Demo scoring and roster changes are local to each demo account on this browser. They do not sync to other laptops. The demo does not create real Auth users or connect to event data. Local demo results are provisional and are not official event results. A connected Supabase installation enables those workflows.
 
+## Multi-computer development (recommended)
+
+Use a separate Supabase development project for development and rehearsal. Do not point local development at the production project: development changes, test accounts, and sample scores must not share the event database. This repository's local launcher explicitly refuses the known production Supabase project. Creating a development project, applying migrations, or copying data is a separate manual task; this guide does not change any database.
+
+In the existing Vercel project settings, add these variables for the **Development** environment only, using credentials from the separate development Supabase project:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY` (mark sensitive; server-side only)
+- `NEXT_PUBLIC_BYPASS_AUTH=false`
+
+Keep production variables configured separately in Vercel; `NEXT_PUBLIC_BYPASS_AUTH` must be false for a real event. Current administrator authorization comes from the server-loaded profile (`is_admin` or `server_admin`), not `NEXT_PUBLIC_ADMIN_PROTECTION_ENABLED`; the latter and the old admin-password variables are unused legacy settings. Do not create or edit production variables as part of local setup.
+
+On each computer, install Node.js 22+, then:
+
+```powershell
+git clone https://github.com/alextai0430/HIDC-2026.git
+cd HIDC-2026
+npm ci
+npx --yes vercel@54.17.3 login
+npx --yes vercel@54.17.3 link
+npm run dev:vercel:check
+npm run dev:vercel
+```
+
+During `vercel link`, select the account/team and **existing Vercel project** that serves `hidc-2026.vercel.app`. If it is not listed, cancel and ask the project owner to grant access; do not create a duplicate project. The Vercel login token is saved in that computer's user configuration, and the project link is saved under ignored `.vercel/`; never copy either between computers or commit them.
+
+Vercel's `env run` passes configured values directly to the process without writing an env file. Do not use `vercel env pull` or `vercel pull` for this workflow because those commands can create local environment files/cache. The launcher also filters inherited Vercel settings, masks keys found in existing `.env*` files from Next.js, checks auth bypass is off, and checks service-key/project consistency without printing values. Leave `.env.local` untouched until you have verified the separate development project and this workflow on your computer; once verified, you may remove that file yourself if it is no longer needed.
+
+For daily use, run `git pull --ff-only origin main`, then `npm ci` if package files changed, then `npm run dev:vercel`. Work on a feature branch and review changes before pushing: pushes to the connected production branch may trigger a production deployment. This setup does not push, deploy, or modify any Vercel or Supabase settings automatically.
+
 ## Connect the real event
 
 1. Create a Supabase project. In its SQL editor run `supabase/migrations/001_hidc.sql`, then `002_live_and_admin.sql`, then `003_usernames_and_development_access.sql`. For an existing installation with 001–003 applied manually, do not rerun them or use `supabase db push`; follow the migration 004 deployment procedure below. New installations should also apply `004_admin_judge_access.sql` after 003. These migrations require the standard Supabase `auth` schema and Realtime publication.
 2. Optionally run `supabase/seed.sql` to add seven sample competitors across all five divisions. Remove or archive these before the event.
-3. Copy `.env.example` to `.env.local`. Change every placeholder:
+3. For manual/local hosting only, configure these variables in the host's secure environment settings (or use an ignored local env file):
    - `NEXT_PUBLIC_SUPABASE_URL`: the project's HTTPS URL.
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: its publishable/anon key. This is browser-safe with the supplied RLS policies.
    - `SUPABASE_SERVICE_ROLE_KEY`: its secret service-role key. Server only; never share with judges or prefix with `NEXT_PUBLIC`.
-   - `NEXT_PUBLIC_ADMIN_PROTECTION_ENABLED`: retained legacy setting; the current account-based permissions ignore its value.
-   - `SCORING_ADMIN_PASSWORD` and `ADMIN_COOKIE_SECRET`: retained legacy settings; the current app does not use an additional admin password.
    - `NEXT_PUBLIC_BYPASS_AUTH=false`: required for a real event. This is a build-time setting: rebuild after changing it.
 4. In Supabase Authentication → Users, create the organizer's email/password account. Copy its UUID, then run:
 
@@ -81,7 +110,7 @@ npm run build
 npm start
 ```
 
-Set the variables above in the hosting provider's environment settings before building. For a real competition set bypass false. The retained admin-protection flag no longer changes permissions; account flags do. Use HTTPS. Point every judge laptop at the same URL and Supabase project. `npm start` binds to loopback for local testing; on a self-hosted server use `npx next start --hostname 0.0.0.0` behind an HTTPS reverse proxy. The project is deployed through the public GitHub repository and Vercel project. No live Supabase credentials are bundled with this repository.
+Set the variables above in the hosting provider's environment settings before building. For a real competition set bypass false. Administrator access comes from account flags. Use HTTPS. Point every judge laptop at the same URL and production Supabase project. `npm start` binds to loopback for local testing; on a self-hosted server use `npx next start --hostname 0.0.0.0` behind an HTTPS reverse proxy. The project is deployed through the public GitHub repository and Vercel project. No live Supabase credentials are bundled with this repository.
 
 ## Verification
 
