@@ -1,12 +1,17 @@
 import { openDB } from "idb";
 import { Operation, Snapshot, Submission } from "./model";
+import type { AppearancePreferences } from "./appearance";
 const database = () =>
   openDB("hidc-2026", 1, {
     upgrade(db) {
       db.createObjectStore("workspaces");
     },
   });
-export type LocalWorkspace = { snapshot: Snapshot; queue: Operation[] };
+export type LocalWorkspace = {
+  snapshot: Snapshot;
+  queue: Operation[];
+  appearancePending?: { preferences: AppearancePreferences; updatedAt: string } | null;
+};
 export async function readLocal(
   user: string,
 ): Promise<LocalWorkspace | undefined> {

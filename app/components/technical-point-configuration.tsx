@@ -238,7 +238,7 @@ export default function TechnicalPointConfiguration({
           </div>
           <div className="point-config-advanced">
             <details open data-category="deduction">
-              <summary>Deduction values</summary>
+              <summary>Deduction Values</summary>
               <div className="point-config-fields" data-category="deduction">
                 {deductions.map((deduction) => (
                   <label key={deduction}>
@@ -249,7 +249,7 @@ export default function TechnicalPointConfiguration({
               </div>
             </details>
             <details data-category="level">
-              <summary>Level multipliers</summary>
+              <summary>Level Multipliers</summary>
               <div className="point-config-fields" data-category="level">
                 {levelKeys.map((level) => (
                   <label key={level}>
@@ -260,7 +260,7 @@ export default function TechnicalPointConfiguration({
               </div>
             </details>
             <details data-category="feature">
-              <summary>Feature multipliers</summary>
+              <summary>Feature Multipliers</summary>
               <div className="point-config-fields" data-category="feature">
                 {featureKeys.map((feature) => (
                   <label key={feature}>
@@ -283,7 +283,7 @@ export default function TechnicalPointConfiguration({
           <section className="point-config-dialog" role="alertdialog" aria-modal="true" aria-labelledby="point-config-warning-title" aria-describedby="point-config-warning-copy">
             <div className="point-config-warning-heading">
               <AlertTriangle size={22} />
-              <h4 id="point-config-warning-title">Update global scoring rules?</h4>
+              <h4 id="point-config-warning-title">Update Global Scoring Rules?</h4>
             </div>
             <p id="point-config-warning-copy" className="point-config-high-risk-warning">
               Changing technical point values recalculates every affected score, including finished competitors and finalized rankings. This may change official placements and exports.

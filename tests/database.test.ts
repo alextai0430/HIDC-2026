@@ -143,11 +143,14 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await db.exec(
     readFileSync("supabase/migrations/006_division_judges.sql", "utf8"),
   );
+  await db.exec(
+    readFileSync("supabase/migrations/20260928041346_user_appearance_preferences.sql", "utf8"),
+  );
   const beforePointConfigScores = (
     await db.query("select * from submissions order by id")
   ).rows;
   await db.exec(
-    readFileSync("supabase/migrations/007_technical_point_configuration.sql", "utf8"),
+    readFileSync("supabase/migrations/20260928033101_technical_point_configuration.sql", "utf8"),
   );
   const initialPointConfig = await db.query<{ revision: number; data_revision: number; t1d: string }>(
     "select revision,data_revision,rules->'bases'->'T'->>'1D' as t1d from scoring_configuration where config_id='global'",
@@ -245,14 +248,18 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   assert.equal(Number(avatarBucket.rows[0].file_size_limit), 2 * 1024 * 1024);
   assert.deepEqual(avatarBucket.rows[0].allowed_mime_types, ["image/jpeg", "image/png", "image/webp"]);
   const afterProfiles = (
-    await db.query<{ is_admin: boolean; id: string; avatar_path: string | null }>(
+    await db.query<{ is_admin: boolean; id: string; avatar_path: string | null; appearance_preferences: Record<string, string>; appearance_updated_at: string }>(
       "select * from profiles order by id",
     )
   ).rows;
   assert.deepEqual(
-    afterProfiles.map(({ is_admin, avatar_path: _avatar, ...p }) => p),
+    afterProfiles.map(({ is_admin, avatar_path: _avatar, appearance_preferences: _appearance, appearance_updated_at: _appearanceAt, ...p }) => p),
     beforeProfiles,
   );
+  assert.deepEqual(afterProfiles[0].appearance_preferences, {
+    template: "control-room", scheme: "hidc-navy", font: "system-ui", mode: "light",
+  });
+  assert.ok(afterProfiles.every((p) => Number.isFinite(Date.parse(p.appearance_updated_at))));
   assert.equal(afterProfiles.find((p) => p.id === user)!.is_admin, true);
   assert.equal(afterProfiles.find((p) => p.id === admin)!.is_admin, true);
   assert.equal(afterProfiles.find((p) => p.id === other)!.is_admin, false);

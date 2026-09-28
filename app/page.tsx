@@ -36,6 +36,8 @@ import {
   canManageScoringConfiguration,
 } from "@/lib/access";
 import { api, demo, supabase } from "@/lib/supabase";
+import { PasswordField } from "@/app/components/password-field";
+import { profilePasswordError } from "@/lib/password-validation";
 import { applyLocal, clearLocal, LocalWorkspace, readLocal, sanitizeWorkspace, writeLocal } from "@/lib/local";
 import {
   categories,
@@ -51,6 +53,8 @@ import {
 } from "@/lib/model";
 import { download } from "@/lib/export";
 import TechnicalPointConfiguration from "@/app/components/technical-point-configuration";
+import AppearanceSettings, { type AppearanceSaveResult } from "@/app/components/appearance-settings";
+import { applyAppearance, AppearancePreferences, defaultAppearance, isAppearancePreferences } from "@/lib/appearance";
 import {
   detailExportRows,
   detailSubmissions,
@@ -172,6 +176,7 @@ export default function Page() {
     [performanceViewSlot, setPerformanceViewSlot] = useState(4),
     [selected, setSelected] = useState<string | null>(null),
     [theme, setTheme] = useState("light");
+  const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
   const [themePreference, setThemePreference] = useState<"system" | "light" | "dark">("light");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileName, setProfileName] = useState("");
@@ -182,7 +187,10 @@ export default function Page() {
   const [profileMessage, setProfileMessage] = useState("");
   const [profileMessageError, setProfileMessageError] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
+  const [appearanceSyncError, setAppearanceSyncError] = useState("");
+  const appearanceSyncBusy = useRef(false);
   const [newDivision, setNewDivision] = useState("");
+  const [divisionFormOpen, setDivisionFormOpen] = useState(false);
   const [trick, setTrick] = useState(""),
     [level, setLevel] = useState(1),
     [features, setFeatures] = useState<string[]>([]),
@@ -323,14 +331,21 @@ export default function Page() {
         stateLabel: complete ? "Complete" : competitor.status === "active" ? "Active · in progress" : started ? "Started · incomplete" : "Not started · locked",
       };
     });
-  const changeThemePreference = (preference: "system" | "light" | "dark") => {
-    setThemePreference(preference);
-    localStorage.setItem("hidc-theme", preference);
-    const effective = preference === "system"
+  const previewAppearance = useCallback((preferences: AppearancePreferences) => {
+    const effective = preferences.mode === "system"
       ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-      : preference;
+      : preferences.mode;
+    setAppearance(preferences);
+    setThemePreference(preferences.mode);
     setTheme(effective);
-    document.documentElement.dataset.theme = effective;
+    applyAppearance(preferences, effective);
+  }, []);
+  const changeThemePreference = (preference: "system" | "light" | "dark") => {
+    const nextAppearance = { ...appearance, mode: preference };
+    previewAppearance(nextAppearance);
+    void saveAppearancePreferences(nextAppearance).catch((error) => {
+      setAppearanceSyncError((error as Error).message);
+    });
   };
   const commit = useCallback(async (next: LocalWorkspace) => {
     if (demo) {
@@ -341,6 +356,27 @@ export default function Page() {
           protected: canManage(next.snapshot.profile),
         },
       };
+    }
+    const previousWorkspace = ref.current;
+    const previousPending = previousWorkspace?.snapshot.profile.id === next.snapshot.profile.id
+      ? previousWorkspace.appearancePending
+      : undefined;
+    if (next.appearancePending === undefined && previousPending) {
+      const serverUpdatedAt = Date.parse(next.snapshot.profile.appearance_updated_at ?? "1970-01-01T00:00:00.000Z");
+      if (Date.parse(previousPending.updatedAt) > serverUpdatedAt) {
+        next = {
+          ...next,
+          appearancePending: previousPending,
+          snapshot: {
+            ...next.snapshot,
+            profile: {
+              ...next.snapshot.profile,
+              appearance_preferences: previousPending.preferences,
+              appearance_updated_at: previousPending.updatedAt,
+            },
+          },
+        };
+      }
     }
     const viewer = next.snapshot.profile;
     if (viewer.role === "judge" && !canManage(viewer)) {
@@ -384,6 +420,52 @@ export default function Page() {
         .catch(() => {});
     }
   }, []);
+  const syncAppearance = useCallback(async () => {
+    if (demo || !navigator.onLine || appearanceSyncBusy.current) return;
+    const before = ref.current;
+    const pending = before?.appearancePending;
+    if (!before || !pending) return;
+    appearanceSyncBusy.current = true;
+    try {
+      const result = await api("profile/appearance", {
+        preferences: pending.preferences,
+        updatedAt: pending.updatedAt,
+      }, { method: "PATCH" }) as {
+        preferences: AppearancePreferences;
+        updatedAt: string;
+        saved: boolean;
+        conflict: boolean;
+      };
+      const current = ref.current;
+      if (!current || current.snapshot.profile.id !== before.snapshot.profile.id) return;
+      if (current.appearancePending?.updatedAt !== pending.updatedAt) return;
+      const updated = {
+        ...current,
+        appearancePending: null,
+        snapshot: {
+          ...current.snapshot,
+          profile: {
+            ...current.snapshot.profile,
+            appearance_preferences: result.preferences,
+            appearance_updated_at: result.updatedAt,
+          },
+        },
+      };
+      await commit(updated);
+      setAppearance(result.preferences);
+      setThemePreference(result.preferences.mode);
+      applyAppearance(result.preferences);
+      setTheme(result.preferences.mode === "system"
+        ? window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+        : result.preferences.mode);
+      setAppearanceSyncError("");
+      if (result.conflict) setNotice("A newer appearance saved on another device was applied.");
+    } catch (error) {
+      setAppearanceSyncError(`Appearance sync failed: ${(error as Error).message}`);
+    } finally {
+      appearanceSyncBusy.current = false;
+    }
+  }, [commit]);
   const fetchState = useCallback(
     () =>
       api(
@@ -449,16 +531,15 @@ export default function Page() {
     }
   }, [commit, fetchState]);
   useEffect(() => {
-    // Light is the event-wide default; dark mode is an explicit console choice.
-    const savedTheme = localStorage.getItem("hidc-theme");
-    const preference = savedTheme === "dark" || savedTheme === "system" ? savedTheme : "light";
+    // Use the event default until this account's saved settings load.
+    const preference: AppearancePreferences["mode"] = "light";
     setThemePreference(preference);
+    const initialAppearance: AppearancePreferences = { ...defaultAppearance, mode: preference };
+    setAppearance(initialAppearance);
     const applyPreference = () => {
-      const effective = preference === "system"
-        ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-        : preference;
+      const effective = preference;
       setTheme(effective);
-      document.documentElement.dataset.theme = effective;
+      applyAppearance(initialAppearance, effective);
     };
     applyPreference();
     try {
@@ -532,17 +613,39 @@ export default function Page() {
     };
   }, [commit]);
   useEffect(() => {
+    if (!profile) return;
+    const preferences = isAppearancePreferences(profile.appearance_preferences)
+      ? profile.appearance_preferences
+      : defaultAppearance;
+    setAppearance(preferences);
+    setThemePreference(preferences.mode);
+    const effective = preferences.mode === "system"
+      ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+      : preferences.mode;
+    setTheme(effective);
+    applyAppearance(preferences, effective);
+  }, [
+    profile?.id,
+    profile?.appearance_preferences?.template,
+    profile?.appearance_preferences?.scheme,
+    profile?.appearance_preferences?.font,
+    profile?.appearance_preferences?.mode,
+  ]);
+  useEffect(() => {
+    if (online && workspace?.appearancePending) void syncAppearance();
+  }, [online, workspace?.snapshot.profile.id, workspace?.appearancePending?.updatedAt, syncAppearance]);
+  useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
       if (themePreference !== "system") return;
       const effective = media.matches ? "dark" : "light";
       setTheme(effective);
-      document.documentElement.dataset.theme = effective;
+      applyAppearance(appearance, effective);
     };
     apply();
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
-  }, [themePreference]);
+  }, [themePreference, appearance]);
   useEffect(() => {
     if (adminUnlocked && showPoints && state && !state.pointAccess) {
       setAdminUnlocked(false);
@@ -556,8 +659,10 @@ export default function Page() {
     const timer = setInterval(() => {
       void sync();
       void refresh();
+      void syncAppearance();
     }, 5000);
     void sync();
+    void syncAppearance();
     const channel =
       !demo && supabase
         ? supabase
@@ -578,7 +683,7 @@ export default function Page() {
       clearInterval(timer);
       if (channel) void supabase?.removeChannel(channel);
     };
-  }, [ready, state?.profile.id, online, sync, refresh]);
+  }, [ready, state?.profile.id, online, sync, refresh, syncAppearance]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 3500);
@@ -654,13 +759,13 @@ export default function Page() {
   };
   const remove = (event: Event) =>
     setModal({
-      title: "Remove this event?",
+      title: "Remove This Event?",
       body: `${event.trick} will be removed from the sequence. Its history remains in the audit log.`,
       action: () => persistAction("delete_event", { id: event.id }),
     });
   const finish = () =>
     setModal({
-      title: "Finish this submission?",
+      title: "Finish This Submission?",
       body: "Your work is saved on this laptop. You can reopen your own entry later for corrections. Pending changes still need to sync.",
       action: () => persistAction("finish", { finished: true }),
     });
@@ -750,7 +855,54 @@ export default function Page() {
     setConfirmLoginPassword("");
     setProfileMessage("");
     setProfileMessageError(false);
+    setAppearanceSyncError("");
     setSettingsOpen(true);
+  }
+  async function saveAppearancePreferences(preferences: AppearancePreferences): Promise<AppearanceSaveResult> {
+    const current = ref.current;
+    if (!current || !profile || current.snapshot.profile.id !== profile.id)
+      throw new Error("Sign in again before saving appearance settings.");
+    const offline = demo || !navigator.onLine || !online;
+    const updatedAt = new Date().toISOString();
+    let result: AppearanceSaveResult = {
+      preferences,
+      updatedAt,
+      saved: true,
+      conflict: false,
+      offline,
+    };
+    if (!offline) {
+      const response = await api("profile/appearance", { preferences, updatedAt }, { method: "PATCH" });
+      result = {
+        preferences: response.preferences,
+        updatedAt: response.updatedAt,
+        saved: response.saved,
+        conflict: response.conflict,
+        offline: false,
+      };
+    }
+    const latest = ref.current;
+    if (!latest || latest.snapshot.profile.id !== profile.id)
+      throw new Error("Your signed-in account changed before the appearance could be saved.");
+    const next: LocalWorkspace = {
+      ...latest,
+      appearancePending: !demo && offline
+        ? { preferences: result.preferences, updatedAt: result.updatedAt }
+        : null,
+      snapshot: {
+        ...latest.snapshot,
+        profile: {
+          ...latest.snapshot.profile,
+          appearance_preferences: result.preferences,
+          appearance_updated_at: result.updatedAt,
+        },
+      },
+    };
+    await commit(next);
+    setAppearanceSyncError("");
+    previewAppearance(result.preferences);
+    if (result.conflict) setNotice("A newer appearance saved on another device was kept.");
+    return result;
   }
   async function saveProfileSettings(e: React.FormEvent) {
     e.preventDefault();
@@ -758,11 +910,9 @@ export default function Page() {
     setProfileMessage("");
     setProfileMessageError(false);
     const usernameChanged = profileUsername.trim().toLowerCase() !== profile.username;
-    if (
-      (newLoginPassword || confirmLoginPassword) &&
-      newLoginPassword !== confirmLoginPassword
-    ) {
-      setProfileMessage("The new passwords do not match.");
+    const passwordError = profilePasswordError(newLoginPassword, confirmLoginPassword);
+    if (passwordError) {
+      setProfileMessage(passwordError);
       setProfileMessageError(true);
       return;
     }
@@ -795,7 +945,7 @@ export default function Page() {
         };
         if (protectedChange) payload.currentPassword = currentPassword;
         if (newLoginPassword) payload.newPassword = newLoginPassword;
-        await api("profile", payload);
+        await api("profile", payload, { method: "PATCH" });
         const snapshot: Snapshot = await fetchState();
         await commit({ snapshot, queue: ref.current?.queue ?? [] });
       }
@@ -888,6 +1038,7 @@ export default function Page() {
     setAdminUnlockToken(null);
     setAdminUnlocked(false);
     setShowPoints(false);
+    previewAppearance(defaultAppearance);
   }
   async function clearOwnOfflineCache() {
     if (!profile || !workspace || workspace.queue.length) return;
@@ -1007,8 +1158,19 @@ export default function Page() {
       setCompetitorEdit(null);
       setUserEdit(null);
       setNotice("Changes saved");
+      return true;
     } catch (e) {
       setSyncError((e as Error).message);
+      return false;
+    }
+  }
+  async function addDivision(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const name = newDivision.trim();
+    if (!name) return;
+    if (await manage("division", { name })) {
+      setNewDivision("");
+      setDivisionFormOpen(false);
     }
   }
   async function switchDemo(value: string) {
@@ -1072,7 +1234,7 @@ export default function Page() {
     return (
       <div className="loading">
         <Activity />
-        <h2>Opening judge console</h2>
+        <h2>Opening Judge Console</h2>
         <p>Restoring your locally saved workspace…</p>
       </div>
     );
@@ -1095,7 +1257,7 @@ export default function Page() {
           <span className="eyebrow">
             HOUSTON INTERNATIONAL DIABOLO COMPETITION
           </span>
-          <h1>Judge sign in</h1>
+          <h1>Judge Sign In</h1>
           <p className="login-help">
             Use the username and password provided by the event organizer.
             <br />Need access help? Contact the organizer.
@@ -1113,8 +1275,7 @@ export default function Page() {
             </label>
             <label>
               Password
-              <input
-                type="password"
+              <PasswordField
                 autoComplete="current-password"
                 required
                 value={password}
@@ -1122,7 +1283,7 @@ export default function Page() {
               />
             </label>
             <button className="primary" disabled={loginBusy}>
-              {loginBusy ? "Signing in…" : "Open judge console"}
+              {loginBusy ? "Signing in…" : "Open Judge Console"}
               <ArrowRight size={18} />
             </button>
           </form>
@@ -1143,11 +1304,11 @@ export default function Page() {
     "Admin",
   ];
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-template={appearance.template}>
       <header>
         <button
           className="brand"
-          title="Toggle light / dark theme"
+          title="Toggle Light / Dark Theme"
           onClick={() => {
             const next = theme === "dark" ? "light" : "dark";
             changeThemePreference(next);
@@ -1179,14 +1340,16 @@ export default function Page() {
                 ? "Offline · saving locally"
                 : syncing
                   ? "Syncing…"
-                  : workspace.queue.length
+                : workspace.queue.length
                     ? `${workspace.queue.length} pending`
+                    : workspace.appearancePending
+                      ? "Appearance pending sync"
                     : "Connected"}
           </span>
           <button
             className="profile-trigger"
             aria-label="Open profile and settings"
-            title="Profile and settings"
+            title="Profile & Settings"
             onClick={openProfileSettings}
           >
             <span className="avatar">
@@ -1207,7 +1370,7 @@ export default function Page() {
           </div>
           <button
             className="icon"
-            title="Sign out"
+            title="Sign Out"
             onClick={() => void signOut()}
           >
             <LogOut size={17} />
@@ -1286,7 +1449,7 @@ export default function Page() {
               void sync();
             }}
           >
-            Retry sync
+            Retry Sync
           </button>
           <button
             onClick={() =>
@@ -1297,13 +1460,13 @@ export default function Page() {
               )
             }
           >
-            Download local backup
+            Download Local Backup
           </button>
           {workspace.queue.length > 0 && (
             <button
               onClick={() =>
                 setModal({
-                  title: "Reload the server copy?",
+                  title: "Reload the Server Copy?",
                   body: "Download your local backup first. This discards pending changes on this laptop and loads the current server entries. Use the backup to reconcile any missing events.",
                   action: () => {
                     void api("state")
@@ -1316,7 +1479,7 @@ export default function Page() {
                 })
               }
             >
-              Resolve conflict
+              Resolve Conflict
             </button>
           )}
           <button onClick={() => setSyncError("")} aria-label="Dismiss error">
@@ -1333,9 +1496,9 @@ export default function Page() {
             </div>
             <h1>
               {tab === "Technical"
-                ? "Technical scoring"
+                  ? "Technical Scoring"
                 : tab === "Performance"
-                  ? "Performance scoring"
+                  ? "Performance Scoring"
                   : tab}
             </h1>
           </div>
@@ -1427,7 +1590,7 @@ export default function Page() {
                   disabled={!canScore}
                   onClick={finish}
                 >
-                  Finish scoring <Check size={17} />
+                  Finish Scoring <Check size={17} />
                 </button>
                 <span className={`scoring-sync-state ${syncing ? "syncing" : syncError && workspace.queue.length ? "attention" : workspace.queue.length || demo ? "local" : "synced"}`} role="status" aria-live="polite">
                   {syncing ? <Activity size={15} /> : syncError && workspace.queue.length ? <CloudOff size={15} /> : workspace.queue.length || demo ? <Save size={15} /> : <CheckCircle2 size={15} />}
@@ -1435,7 +1598,7 @@ export default function Page() {
                 </span>
                 {syncError && workspace.queue.length > 0 && (
                   <button className="sync-retry" disabled={!online || syncing} onClick={() => void sync()}>
-                    Retry sync
+                    Retry Sync
                   </button>
                 )}
               </div>
@@ -1445,7 +1608,7 @@ export default function Page() {
                 <aside className="sequence panel">
                   <div className="panel-heading">
                     <h3>
-                      <PanelLeft size={16} /> Trick sequence
+                      <PanelLeft size={16} /> Trick Sequence
                     </h3>
                     <span className="count">
                       {displayed?.events.length ?? 0}
@@ -1455,7 +1618,7 @@ export default function Page() {
                     {!displayed?.events.length ? (
                       <div className="empty-sequence">
                         <Layers size={28} />
-                        <h4>No events yet</h4>
+                        <h4>No Events Yet</h4>
                         <span>
                           Select a trick to begin <ArrowRight size={13} />
                         </span>
@@ -1524,7 +1687,7 @@ export default function Page() {
                   </div>
                   <div className="sequence-footer">
                     <Shield size={15} />
-                    <span>Technical total</span>
+                    <span>Technical Total</span>
                     <b>{canViewPoints && displayed?.total !== undefined ? fmt(displayed.total) : "***"}</b>
                   </div>
                 </aside>
@@ -1532,7 +1695,7 @@ export default function Page() {
                   <section className="panel trick-panel">
                     <div className="panel-heading">
                       <h3>
-                        01 <span>Select a trick</span>
+                        01 <span>Select a Trick</span>
                       </h3>
                       <span className="muted">Type × diabolo count</span>
                     </div>
@@ -1583,7 +1746,7 @@ export default function Page() {
                   <section className="panel deductions">
                     <div className="panel-heading">
                       <h3>
-                        <Flag size={15} /> Major deductions
+                        <Flag size={15} /> Major Deductions
                       </h3>
                       <span className="muted">Recorded as events</span>
                     </div>
@@ -1672,7 +1835,7 @@ export default function Page() {
                       onClick={submit}
                     >
                       <Plus size={18} />
-                      {editing ? "Update event" : "Record event"}
+                      {editing ? "Update Event" : "Record Event"}
                       <kbd>↵</kbd>
                     </button>
                   </div>
@@ -1785,7 +1948,7 @@ export default function Page() {
                   </div>
                 ))}
               <button onClick={() => setTab("Saved Competitors")}>
-                Full performance order <ArrowRight size={14} />
+                Full Performance Order <ArrowRight size={14} />
               </button>
             </section>
           </>
@@ -1793,12 +1956,12 @@ export default function Page() {
         {tab === "Saved Competitors" && (
           <section className="panel records">
             <div className="panel-heading">
-              <h3>Performance order</h3>
+              <h3>Performance Order</h3>
               <select
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
               >
-                <option>All divisions</option>
+                <option>All Divisions</option>
                 {allDivisions.map((d) => (
                   <option key={d}>{d}</option>
                 ))}
@@ -1812,7 +1975,7 @@ export default function Page() {
                     <th>Competitor</th>
                     <th>Division</th>
                     <th>Routine</th>
-                    <th>Your submission</th>
+                    <th>Your Submission</th>
                     <th />
                   </tr>
                 </thead>
@@ -1902,13 +2065,13 @@ export default function Page() {
           <section className="panel records">
             <div className="panel-heading">
               <h3>
-                <Trophy size={17} /> Your personal rankings
+                <Trophy size={17} /> Your Personal Rankings
               </h3>
               <select
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
               >
-                <option>All divisions</option>
+                <option>All Divisions</option>
                 {allDivisions.map((d) => (
                   <option key={d}>{d}</option>
                 ))}
@@ -1950,7 +2113,7 @@ export default function Page() {
             {!state.personal?.length && (
               <div className="empty-state">
                 <Trophy />
-                <h3>No finished rankings yet</h3>
+                <h3>No Finished Rankings Yet</h3>
                 <p>
                   Finish and sync a submission to see your personal results.
                 </p>
@@ -1961,7 +2124,7 @@ export default function Page() {
         {tab === "Score Details" && (
           <section className="panel records">
             <div className="panel-heading">
-              <h3>Submission details</h3>
+              <h3>Submission Details</h3>
             </div>
             {canViewPoints && <div className="exports">
               {(["csv", "txt"] as const).map((format) => (
@@ -2089,7 +2252,7 @@ export default function Page() {
             )}
             {server && (
               <>
-                <h3 className="audit-title">Audit history</h3>
+                <h3 className="audit-title">Audit History</h3>
                 {!demo && !!state.audit?.length && (
                   <button
                     style={{ margin: 20 }}
@@ -2146,14 +2309,13 @@ export default function Page() {
           !adminUnlocked ? (
             <section className="panel admin-password-panel">
               <div className="panel-heading">
-                <h3>Admin access</h3>
+                <h3>Admin Access</h3>
               </div>
               <p>Enter the admin password to view score values.</p>
               <form onSubmit={verifyAdminPassword}>
                 <label>
                   Admin password
-                  <input
-                    type="password"
+                  <PasswordField
                     autoComplete="current-password"
                     required
                     value={adminPassword}
@@ -2166,7 +2328,7 @@ export default function Page() {
                   </p>
                 )}
                 <button className="primary" disabled={adminPasswordBusy}>
-                  {adminPasswordBusy ? "Checking…" : "Unlock admin tab"}
+                  {adminPasswordBusy ? "Checking…" : "Unlock Admin Tab"}
                   <ArrowRight size={16} />
                 </button>
               </form>
@@ -2175,18 +2337,18 @@ export default function Page() {
           <section className="panel records">
             <div className="panel-heading">
               <div>
-                <h3>Admin access</h3>
+                <h3>Admin Access</h3>
                 <p className="muted admin-points-help">Unlock stays active as you move between tabs. It resets after reload.</p>
               </div>
               <button
                 onClick={lockAdmin}
               >
-                <Lock size={14} /> Lock Admin tab
+                <Lock size={14} /> Lock Admin Tab
               </button>
             </div>
             <div className="admin-points-toggle-row">
               <div>
-                <b>Show points</b>
+                <b>Show Points</b>
                 <span className="muted">{showPoints ? "Your permitted score data is visible across this session." : "Point values and totals stay masked until enabled."}</span>
               </div>
               <button
@@ -2196,7 +2358,7 @@ export default function Page() {
                 aria-checked={showPoints}
                 onClick={() => void toggleShowPoints()}
               >
-                {showPoints ? "Hide points" : "Show points"}
+                {showPoints ? "Hide Points" : "Show Points"}
               </button>
             </div>
             {canViewPoints && exports((format, ranked) => {
@@ -2254,7 +2416,7 @@ export default function Page() {
             <section className="panel">
               <div className="panel-heading">
                 <h3>
-                  <Radio size={17} /> Floor control
+                  <Radio size={17} /> Floor Control
                 </h3>
                 <span className="pill live">
                   {active ? "Routine active" : "Floor idle"}
@@ -2271,13 +2433,13 @@ export default function Page() {
                   onClick={() =>
                     active &&
                     setModal({
-                      title: "End and lock this routine?",
+                      title: "End and Lock This Routine?",
                       body: "Judges can still correct their existing saved submissions. New entries require the routine to be active.",
                       action: () => void manage("lock", { id: active.id }),
                     })
                   }
                 >
-                  <Lock size={15} /> End routine
+                  <Lock size={15} /> End Routine
                 </button>
                 <button
                   className="primary"
@@ -2294,33 +2456,61 @@ export default function Page() {
                       });
                   }}
                 >
-                  Start next <ArrowRight size={16} />
+                  Start Next <ArrowRight size={16} />
                 </button>
               </div>
             </section>
             <section className="panel records division-assignment-panel">
               <div className="panel-heading">
-                <h3>Division judge assignments</h3>
-                <label>
-                  Division
-                  <select
-                    aria-label="Division judge assignments"
-                    value={assignmentDivision}
-                    onChange={(event) => {
-                      const nextDivision = event.target.value;
-                      setAssignmentDivision(nextDivision);
-                      setAssignmentDraft(Object.fromEntries(
-                        (state.assignments ?? [])
-                          .filter((a) => a.division === nextDivision)
-                          .map((a) => [String(a.slot), a.user_id]),
-                      ));
+                <h3>Division Judge Assignments</h3>
+                <div className="division-assignment-header-actions">
+                  <label>
+                    Division
+                    <select
+                      aria-label="Division judge assignments"
+                      value={assignmentDivision}
+                      onChange={(event) => {
+                        const nextDivision = event.target.value;
+                        setAssignmentDivision(nextDivision);
+                        setAssignmentDraft(Object.fromEntries(
+                          (state.assignments ?? [])
+                            .filter((a) => a.division === nextDivision)
+                            .map((a) => [String(a.slot), a.user_id]),
+                        ));
+                      }}
+                    >
+                      {allDivisions.map((division) => <option key={division}>{division}</option>)}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    disabled={demo}
+                    onClick={() => {
+                      setNewDivision("");
+                      setDivisionFormOpen(true);
                     }}
                   >
-                    {allDivisions.map((division) => <option key={division}>{division}</option>)}
-                  </select>
-                </label>
+                  <Plus size={14} /> Add Division
+                  </button>
+                </div>
               </div>
               <p>Choose five active judges, one for each scoring slot. The same group scores this division; a judge can be assigned to multiple divisions. Assignments lock after scoring starts.</p>
+              {divisionFormOpen && (
+                <form className="division-add-form" onSubmit={addDivision}>
+                  <label>
+                    New division name
+                    <input
+                      autoFocus
+                      required
+                      maxLength={80}
+                      value={newDivision}
+                      onChange={(event) => setNewDivision(event.target.value)}
+                    />
+                  </label>
+                  <button type="button" onClick={() => setDivisionFormOpen(false)}>Cancel</button>
+                  <button className="primary" disabled={demo || !newDivision.trim()}>Save Division</button>
+                </form>
+              )}
               <div className="division-assignment-grid">
                 {[1, 2, 3, 4, 5].map((slot) => {
                   const selectedId = assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)] ?? "";
@@ -2358,13 +2548,13 @@ export default function Page() {
                     })),
                   })}
                 >
-                  Save judge group
+                  Save Judge Group
                 </button>
               </div>
             </section>
             <section className="panel records progress-overview">
               <div className="panel-heading">
-                <h3>Competitor progress</h3>
+                <h3>Competitor Progress</h3>
                 <span className="muted">Green only when all five assigned judges finish</span>
               </div>
               <div className="progress-table-wrap">
@@ -2412,7 +2602,7 @@ export default function Page() {
             ) : null}
             <section className="panel records">
               <div className="panel-heading">
-                <h3>Competitor roster</h3>
+                <h3>Competitor Roster</h3>
                 <button
                   className="primary"
                   onClick={() =>
@@ -2426,7 +2616,7 @@ export default function Page() {
                     })
                   }
                 >
-                  <Plus size={16} /> Add competitor
+                  <Plus size={16} /> Add Competitor
                 </button>
               </div>
               <div className="table-scroll">
@@ -2485,7 +2675,7 @@ export default function Page() {
             <section className="panel records">
               <div className="panel-heading">
                 <h3>
-                  <Users size={16} /> Judge access
+                  <Users size={16} /> Judge Access
                 </h3>
                 <button
                   onClick={() =>
@@ -2498,7 +2688,7 @@ export default function Page() {
                     })
                   }
                 >
-                  <Plus size={15} /> Create judge
+                  <Plus size={15} /> Create Judge
                 </button>
               </div>
               {demo && (
@@ -2549,7 +2739,7 @@ export default function Page() {
                           ? "Protected administrator"
                           : p
                             ? "Manage account"
-                            : "Assign judge"}
+                            : "Assign Judge"}
                       </button>
                     </div>
                   );
@@ -2561,7 +2751,7 @@ export default function Page() {
                   <div className="detail-event" key={p.id}>
                     {p.avatar_url ? <img className="admin-roster-avatar" src={p.avatar_url} alt={`${p.name} profile`} /> : null}
                     <span>{p.name} · @{p.username} · {p.slot! < 4 ? "Technical" : "Performance"} Judge {p.slot}</span>
-                    <button onClick={() => setUserEdit({ ...p, username: p.username ?? "", password: "" })}>Manage account</button>
+                    <button onClick={() => setUserEdit({ ...p, username: p.username ?? "", password: "" })}>Manage Account</button>
                   </div>
                 ))}
               {state.profiles
@@ -2579,7 +2769,7 @@ export default function Page() {
                         })
                       }
                     >
-                      Edit account
+                      Edit Account
                     </button>
                   </div>
                 ))}
@@ -2587,7 +2777,7 @@ export default function Page() {
             <section className="panel records admin-tab-password-panel">
               <div className="panel-heading">
                 <h3>
-                  <Shield size={17} /> Shared Admin-tab password
+                  <Shield size={17} /> Shared Admin Tab Password
                 </h3>
                 <span className="pill">Administrators only</span>
               </div>
@@ -2601,8 +2791,7 @@ export default function Page() {
               >
                 <label>
                   New shared password
-                  <input
-                    type="password"
+                  <PasswordField
                     autoComplete="new-password"
                     minLength={6}
                     maxLength={256}
@@ -2613,8 +2802,7 @@ export default function Page() {
                 </label>
                 <label>
                   Confirm new password
-                  <input
-                    type="password"
+                  <PasswordField
                     autoComplete="new-password"
                     minLength={6}
                     maxLength={256}
@@ -2629,38 +2817,14 @@ export default function Page() {
                   </p>
                 )}
                 <button className="primary">
-                  Update shared password <ArrowRight size={16} />
-                </button>
-              </form>
-            </section>
-            <section className="panel">
-              <div className="panel-heading">
-                <h3>Divisions</h3>
-              </div>
-              <form
-                className="division-form"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void manage("division", { name: newDivision });
-                  setNewDivision("");
-                }}
-              >
-                <input
-                  aria-label="New division name"
-                  placeholder="New division name"
-                  required
-                  value={newDivision}
-                  onChange={(e) => setNewDivision(e.target.value)}
-                />
-                <button disabled={demo}>
-                  <Plus size={14} /> Add division
+                  Update Shared Password <ArrowRight size={16} />
                 </button>
               </form>
             </section>
             <section className="panel records">
               <div className="panel-heading">
                 <h3>
-                  <Trophy size={17} /> Global rankings
+                  <Trophy size={17} /> Global Rankings
                 </h3>
                 <span className="muted">70 technical + 30 performance</span>
               </div>
@@ -2807,7 +2971,7 @@ export default function Page() {
         </span>
       </footer>
       {settingsOpen && profile && (
-        <Dialog title="Profile & settings" close={() => setSettingsOpen(false)}>
+        <Dialog title="Profile & Settings" close={() => setSettingsOpen(false)}>
           <div className="profile-avatar-control">
             <span className="avatar profile-avatar-large">
               {profile.avatar_url ? (
@@ -2858,32 +3022,34 @@ export default function Page() {
             <p className="profile-help">Your username is used to sign in. It must be unique.</p>
             <label>
               Current password <span className="muted">(required for username or password changes)</span>
-              <input type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+              <PasswordField autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
             </label>
             <label>
               New password <span className="muted">(optional · minimum 6 characters)</span>
-              <input type="password" minLength={6} maxLength={256} autoComplete="new-password" value={newLoginPassword} onChange={(e) => setNewLoginPassword(e.target.value)} />
+              <PasswordField minLength={6} maxLength={256} autoComplete="new-password" value={newLoginPassword} onChange={(e) => setNewLoginPassword(e.target.value)} />
             </label>
             <label>
               Confirm new password
-              <input type="password" minLength={6} maxLength={256} autoComplete="new-password" value={confirmLoginPassword} onChange={(e) => setConfirmLoginPassword(e.target.value)} />
+              <PasswordField minLength={6} maxLength={256} autoComplete="new-password" value={confirmLoginPassword} onChange={(e) => setConfirmLoginPassword(e.target.value)} />
             </label>
             <p className="password-privacy-notice">Use a password only for this scoring system. Event organizers can reset account access; do not reuse a personal password.</p>
             <div className="profile-settings-actions">
               <button className="primary" disabled={profileBusy || (!online && !demo)}>
-                {profileBusy ? "Saving…" : "Save profile"}
+                {profileBusy ? "Saving…" : "Save Profile"}
               </button>
             </div>
           </form>
           <div className="profile-local-settings">
-            <label>
-              Theme preference
-              <select value={themePreference} onChange={(e) => changeThemePreference(e.target.value as "system" | "light" | "dark")}>
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
-            </label>
+            <AppearanceSettings
+              initial={isAppearancePreferences(profile?.appearance_preferences)
+                ? profile.appearance_preferences
+                : defaultAppearance}
+              online={online && !demo}
+              demo={demo}
+              onPreview={previewAppearance}
+              onSave={saveAppearancePreferences}
+            />
+            {appearanceSyncError && <p className="error appearance-sync-error" role="status">{appearanceSyncError}</p>}
             <div className="profile-setting-row">
               <div><b>Hotkeys</b><span>Configure your local keyboard shortcuts.</span></div>
               <button type="button" onClick={() => { setSettingsOpen(false); setKeysOpen(true); }}>Configure</button>
@@ -2896,22 +3062,22 @@ export default function Page() {
                 onClick={() => {
                   setSettingsOpen(false);
                   setModal({
-                    title: "Clear your offline cache?",
+                    title: "Clear Your Offline Cache?",
                     body: workspace?.queue.length
                       ? "Sync pending score changes first."
                       : "This removes only your local workspace from this browser and signs you out. It does not delete online profiles or scoring records.",
                     action: () => void clearOwnOfflineCache(),
                   });
                 }}
-              >Clear cache</button>
+              >Clear Cache</button>
             </div>
             {workspace?.queue.length ? <p className="profile-help">Sync {workspace.queue.length} pending score change(s) before clearing your cache or signing out.</p> : null}
           </div>
           <div className="profile-dialog-footer">
-            <button type="button" onClick={() => void signOut()}><LogOut size={15} /> Sign out</button>
+            <button type="button" onClick={() => void signOut()}><LogOut size={15} /> Sign Out</button>
           </div>
           {profileMessage && <p className={profileMessageError ? "error" : "success"} role="status">{profileMessage}</p>}
-          {!online && !demo && <p className="profile-help">Profile, username, password, and picture changes require an online connection. Theme and hotkeys remain available offline.</p>}
+          {!online && !demo && <p className="profile-help">Profile, username, password, and picture changes require an online connection. Appearance and hotkeys remain available offline and sync when reconnected.</p>}
         </Dialog>
       )}
       {notice && (
@@ -2976,7 +3142,7 @@ export default function Page() {
           </div>
           <div className="dialog-actions">
             <button onClick={() => setHotkeys(defaultKeys)}>
-              Reset defaults
+              Reset Defaults
             </button>
             <button
               className="primary"
@@ -2999,7 +3165,7 @@ export default function Page() {
       )}
       {competitorEdit && (
         <Dialog
-          title={competitorEdit.id ? "Edit competitor" : "Add competitor"}
+          title={competitorEdit.id ? "Edit Competitor" : "Add Competitor"}
           close={() => setCompetitorEdit(null)}
         >
           <form
@@ -3007,7 +3173,7 @@ export default function Page() {
               e.preventDefault();
               if (competitorEdit.archived || competitorEdit.dq) {
                 setModal({
-                  title: "Confirm competitor status change?",
+                  title: "Confirm Competitor Status Change?",
                   body: "Archiving or disqualifying this competitor changes access and results. Scores and audit history are preserved.",
                   action: () => void manage("save", competitorEdit),
                 });
@@ -3104,14 +3270,14 @@ export default function Page() {
               <button type="button" onClick={() => setCompetitorEdit(null)}>
                 Cancel
               </button>
-              <button className="primary">Save competitor</button>
+              <button className="primary">Save Competitor</button>
             </div>
           </form>
         </Dialog>
       )}
       {userEdit && (
         <Dialog
-          title={userEdit.id ? "Manage judge account" : "Create judge account"}
+          title={userEdit.id ? "Manage Judge Account" : "Create Judge Account"}
           close={() => setUserEdit(null)}
         >
           <form
@@ -3138,8 +3304,7 @@ export default function Page() {
               {userEdit.id
                 ? "New password (leave blank to keep)"
                 : "Password (6+ characters)"}
-              <input
-                type="password"
+              <PasswordField
                 minLength={6}
                 required={!userEdit.id}
                 value={userEdit.password ?? ""}
@@ -3181,7 +3346,7 @@ export default function Page() {
               <button type="button" onClick={() => setUserEdit(null)}>
                 Cancel
               </button>
-              <button className="primary">Save account</button>
+              <button className="primary">Save Account</button>
             </div>
           </form>
         </Dialog>

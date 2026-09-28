@@ -1,7 +1,37 @@
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
-import { identity, failure } from "@/lib/server";
+import { identity } from "@/lib/server";
 import { internalAddress, usernameSchema } from "@/lib/usernames";
+
+function json(data: unknown, status = 200) {
+  return Response.json(data, {
+    status,
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
+function methodNotAllowed() {
+  return json({ error: "Method not allowed." }, 405);
+}
+
+export const GET = methodNotAllowed;
+export const POST = methodNotAllowed;
+export const PUT = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
+
+function profileFailure(error: unknown) {
+  if (error instanceof z.ZodError)
+    return json({ error: error.issues[0]?.message ?? "Invalid profile update." }, 400);
+  if (error instanceof SyntaxError)
+    return json({ error: "Invalid profile request body." }, 400);
+  if (error instanceof Error) {
+    if (error.message === "Sign in required") return json({ error: error.message }, 401);
+    if (error.message === "Account inactive or not assigned")
+      return json({ error: error.message }, 403);
+  }
+  return json({ error: "Profile settings could not be saved. Please try again." }, 500);
+}
 
 const updateSchema = z
   .object({
@@ -25,9 +55,9 @@ export async function PATCH(req: Request) {
       process.env.NEXT_PUBLIC_BYPASS_AUTH === "true";
     if (protectedChange && !localDemo) {
       if (!input.currentPassword)
-        return Response.json(
+        return json(
           { error: "Enter your current password to change your username or password." },
-          { status: 400 },
+          400,
         );
       const { data: authResult, error: authError } =
         await client.auth.admin.getUserById(profile.id);
@@ -44,7 +74,7 @@ export async function PATCH(req: Request) {
         password: input.currentPassword,
       });
       if (checked.error)
-        return Response.json({ error: "Current password is incorrect." }, { status: 401 });
+        return json({ error: "Current password is incorrect." }, 401);
     }
 
     if (usernameChanged) {
@@ -56,7 +86,7 @@ export async function PATCH(req: Request) {
         .maybeSingle();
       if (duplicate.error) throw duplicate.error;
       if (duplicate.data)
-        return Response.json({ error: "That username is already in use." }, { status: 409 });
+        return json({ error: "That username is already in use." }, 409);
     }
 
     const profileUpdate: Record<string, string> = {};
@@ -68,7 +98,7 @@ export async function PATCH(req: Request) {
         .update(profileUpdate)
         .eq("id", profile.id);
       if (error?.code === "23505")
-        return Response.json({ error: "That username is already in use." }, { status: 409 });
+        return json({ error: "That username is already in use." }, 409);
       if (error) throw error;
     }
 
@@ -90,8 +120,8 @@ export async function PATCH(req: Request) {
       }
     }
 
-    return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+    return json({ ok: true });
   } catch (e) {
-    return failure(e);
+    return profileFailure(e);
   }
 }

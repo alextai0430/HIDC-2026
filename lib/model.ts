@@ -1,3 +1,5 @@
+import type { AppearancePreferences } from "./appearance";
+
 export const divisions = [
   "Team Division",
   "Individual Juniors",
@@ -47,6 +49,9 @@ export type Profile = {
   avatar_url?: string | null;
   // Optional for pre-migration offline workspaces; missing means no added privilege.
   is_admin?: boolean;
+  // Safe presentation-only settings for this profile; never copied to admin roster rows.
+  appearance_preferences?: AppearancePreferences;
+  appearance_updated_at?: string;
 };
 export type Competitor = {
   id: string;

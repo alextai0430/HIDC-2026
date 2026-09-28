@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import ts from "typescript";
 import { validatedImageType } from "../lib/profile-image";
+import { profilePasswordError } from "../lib/password-validation";
 import type { Profile } from "../lib/model";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "https://example.supabase.co";
@@ -32,15 +33,33 @@ function load(file: string, overrides: Record<string, unknown>): any {
 const judge: Profile = {
   id: crypto.randomUUID(), name: "Judge Three", username: "judge3", role: "judge", slot: 3, active: true,
 };
-function profileRoute(options: { wrongPassword?: boolean; duplicate?: boolean; actor?: Profile } = {}) {
+function profileRoute(options: {
+  wrongPassword?: boolean;
+  duplicate?: boolean;
+  actor?: Profile;
+  identityError?: string;
+  authUpdateError?: boolean;
+} = {}) {
   const actor = options.actor ?? judge;
   const updates: unknown[] = [];
   const updateTargets: string[] = [];
   const authUpdates: unknown[] = [];
+  let storedPassword = options.wrongPassword ? "other-password" : "current-secret";
+  const passwordAuth = {
+    signInWithPassword: async ({ password }: { password: string }) => ({
+      error: password === storedPassword ? null : new Error("invalid"),
+    }),
+  };
   const client = {
     auth: { admin: {
       getUserById: async () => ({ data: { user: { email: "judge3.random@hidc.internal" } }, error: null }),
-      updateUserById: async (_id: string, value: unknown) => { authUpdates.push(value); return { error: null }; },
+      updateUserById: async (_id: string, value: unknown) => {
+        authUpdates.push(value);
+        if (options.authUpdateError) return { error: new Error("update failed") };
+        if (typeof value === "object" && value && "password" in value)
+          storedPassword = String((value as { password: string }).password);
+        return { error: null };
+      },
     } },
     from: (_table: string) => {
       const query: any = {
@@ -54,26 +73,37 @@ function profileRoute(options: { wrongPassword?: boolean; duplicate?: boolean; a
     },
   };
   const server = {
-    identity: async () => ({ profile: actor, client }),
+    identity: async () => {
+      if (options.identityError) throw new Error(options.identityError);
+      return { profile: actor, client };
+    },
     failure: (error: unknown) => Response.json({ error: String(error) }, { status: 400 }),
   };
   const handlers = load("app/api/profile/route.ts", {
     "@/lib/server": server,
     "@/lib/usernames": require("../lib/usernames"),
-    "@supabase/supabase-js": { createClient: () => ({ auth: { signInWithPassword: async () => ({ error: options.wrongPassword ? new Error("invalid") : null }) } }) },
+    "@supabase/supabase-js": { createClient: () => ({ auth: passwordAuth }) },
   });
-  return { handlers, updates, updateTargets, authUpdates };
+  return {
+    handlers,
+    updates,
+    updateTargets,
+    authUpdates,
+    signInWithPassword: passwordAuth.signInWithPassword,
+  };
 }
 const patchRequest = (value: unknown) => new Request("http://localhost/api/profile", {
   method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value),
 });
 
 test("profile updates verify current password and change only self profile plus private synthetic mapping", async () => {
-  const { handlers, updates, authUpdates } = profileRoute();
+  const fixture = profileRoute();
+  const { handlers, updates, authUpdates } = fixture;
   const response = await handlers.PATCH(patchRequest({
     name: "Judge Three Updated", username: "judge3new", currentPassword: "current-secret", newPassword: "new-secret-123",
   }));
   assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  assert.match(response.headers.get("Content-Type") ?? "", /^application\/json\b/i);
   assert.deepEqual(await response.json(), { ok: true });
   assert.deepEqual(updates, [{ name: "Judge Three Updated", username: "judge3new" }]);
   assert.equal(authUpdates.length, 1);
@@ -81,6 +111,8 @@ test("profile updates verify current password and change only self profile plus 
   assert.match(mapping.email, /^judge3new\.[^@]+@hidc\.internal$/);
   assert.equal(mapping.password, "new-secret-123");
   assert.equal(mapping.email_confirm, true);
+  assert.equal((await fixture.signInWithPassword({ password: "new-secret-123" })).error, null);
+  assert.ok((await fixture.signInWithPassword({ password: "current-secret" })).error);
 });
 
 test("profile endpoint rejects attempts to edit IDs, role, slot, or administrator state", async () => {
@@ -100,6 +132,74 @@ test("profile endpoint rejects duplicate usernames and incorrect current passwor
   const denied = await incorrect.handlers.PATCH(patchRequest({ name: judge.name, username: "different", currentPassword: "wrong" }));
   assert.equal(denied.status, 401);
   assert.equal(incorrect.updates.length, 0);
+
+  const missingCurrentPassword = profileRoute();
+  const missing = await missingCurrentPassword.handlers.PATCH(patchRequest({ name: judge.name, username: "different" }));
+  assert.equal(missing.status, 400);
+  assert.match(missing.headers.get("Content-Type") ?? "", /^application\/json\b/i);
+  assert.ok((await missing.json()).error);
+  assert.equal(missingCurrentPassword.authUpdates.length, 0);
+});
+
+test("profile endpoint returns JSON for validation, unauthorized, server-error, and no-op paths", async () => {
+  const noOp = profileRoute();
+  const unchanged = await noOp.handlers.PATCH(patchRequest({ name: judge.name, username: judge.username }));
+  assert.equal(unchanged.status, 200);
+  assert.match(unchanged.headers.get("Content-Type") ?? "", /^application\/json\b/i);
+  assert.deepEqual(await unchanged.json(), { ok: true });
+
+  const unsupported = await noOp.handlers.POST(new Request("http://localhost/api/profile", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: judge.name, username: judge.username }),
+  }));
+  assert.equal(unsupported.status, 405);
+  assert.match(unsupported.headers.get("Content-Type") ?? "", /^application\/json\b/i);
+  assert.deepEqual(await unsupported.json(), { error: "Method not allowed." });
+
+  const invalid = await noOp.handlers.PATCH(new Request("http://localhost/api/profile", {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: "{",
+  }));
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.headers.get("Content-Type") ?? "", /^application\/json\b/i);
+  assert.ok((await invalid.json()).error);
+
+  const unauthorized = profileRoute({ identityError: "Sign in required" });
+  const denied = await unauthorized.handlers.PATCH(patchRequest({ name: judge.name, username: judge.username }));
+  assert.equal(denied.status, 401);
+  assert.match(denied.headers.get("Content-Type") ?? "", /^application\/json\b/i);
+  assert.ok((await denied.json()).error);
+
+  const serverError = profileRoute({ authUpdateError: true });
+  const failed = await serverError.handlers.PATCH(patchRequest({
+    name: judge.name, username: judge.username, currentPassword: "current-secret", newPassword: "new-pass-123",
+  }));
+  assert.equal(failed.status, 500);
+  assert.match(failed.headers.get("Content-Type") ?? "", /^application\/json\b/i);
+  assert.ok((await failed.json()).error);
+});
+
+test("password confirmation and length validation report mismatch and invalid values", () => {
+  assert.equal(profilePasswordError("", ""), null);
+  assert.equal(profilePasswordError("", "something"), "The new passwords do not match.");
+  assert.equal(profilePasswordError("new-password", "different"), "The new passwords do not match.");
+  assert.equal(profilePasswordError("short", "short"), "New password must be between 6 and 256 characters.");
+  assert.equal(profilePasswordError("valid-123", "valid-123"), null);
+  assert.equal(profilePasswordError("x".repeat(257), "x".repeat(257)), "New password must be between 6 and 256 characters.");
+});
+
+test("profile API rejects empty or too-short password values", async () => {
+  for (const newPassword of ["", "short"]) {
+    const fixture = profileRoute();
+    const response = await fixture.handlers.PATCH(patchRequest({
+      name: judge.name,
+      username: judge.username,
+      currentPassword: "current-secret",
+      newPassword,
+    }));
+    assert.equal(response.status, 400);
+    assert.match(response.headers.get("Content-Type") ?? "", /^application\/json\b/i);
+    assert.ok((await response.json()).error);
+    assert.equal(fixture.authUpdates.length, 0);
+  }
 });
 
 test("profile endpoint never returns password, hash, or hidden auth email", async () => {
