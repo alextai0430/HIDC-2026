@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Save, SlidersHorizontal } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Save, SlidersHorizontal } from "lucide-react";
 import { api } from "@/lib/supabase";
 import { deductions, tricks } from "@/lib/model";
 import type { ScoringConfiguration, ScoringRules } from "@/lib/model";
@@ -23,6 +23,8 @@ type Preview = {
   impact: ScoringConfigurationImpact;
   unchanged: boolean;
 };
+type PreviousRevision = { revision: number; updatedAt: string | null; rules: ScoringRules };
+type ConfigurationWithHistory = ScoringConfiguration & { previousRevisions?: PreviousRevision[] };
 type Props = {
   adminUnlockToken: string;
   queuedActions: number;
@@ -79,6 +81,8 @@ export default function TechnicalPointConfiguration({
   onSaved,
 }: Props) {
   const [revision, setRevision] = useState<number | null>(null);
+  const [previousRevisions, setPreviousRevisions] = useState<PreviousRevision[]>([]);
+  const [selectedRevision, setSelectedRevision] = useState("");
   const [draft, setDraft] = useState<RuleDraft | null>(null);
   const [savedDraft, setSavedDraft] = useState<RuleDraft | null>(null);
   const [loading, setLoading] = useState(true);
@@ -93,10 +97,13 @@ export default function TechnicalPointConfiguration({
     setLoading(true);
     setError("");
     void api("scoring-configuration", undefined, { adminUnlockToken })
-      .then((configuration: ScoringConfiguration) => {
+      .then((configuration: ConfigurationWithHistory) => {
         if (!active) return;
         const nextDraft = toDraft(configuration.rules);
         setRevision(configuration.revision);
+        const history = configuration.previousRevisions ?? [];
+        setPreviousRevisions(history);
+        setSelectedRevision(history[0] ? String(history[0].revision) : "");
         setDraft(nextDraft);
         setSavedDraft(nextDraft);
       })
@@ -194,12 +201,29 @@ export default function TechnicalPointConfiguration({
 
   const dirty = !!draft && !!savedDraft && JSON.stringify(draft) !== JSON.stringify(savedDraft);
   const staleQueue = queuedActions > 0 && revision !== null && oldestQueuedRevision !== undefined && oldestQueuedRevision < revision;
+  const loadSelectedRevision = () => {
+    const previous = previousRevisions.find((entry) => String(entry.revision) === selectedRevision);
+    if (!previous || busy) return;
+    if (dirty && !window.confirm("Discard unsaved edits and load the selected saved revision as a draft?")) return;
+    setDraft(toDraft(previous.rules));
+    setError("");
+    setMessage(`Revision ${previous.revision} loaded as a draft. Save and confirm to apply it as a new revision.`);
+  };
 
   return (
     <section className="panel records technical-point-config" aria-labelledby="technical-point-config-heading">
       <div className="panel-heading">
         <h3 id="technical-point-config-heading"><SlidersHorizontal size={16} /> Technical Point Configuration</h3>
-        {revision !== null ? <span className="muted">Revision {revision}</span> : null}
+        <div className="point-config-revision-controls">
+          {revision !== null ? <span className="muted">Revision {revision}</span> : null}
+          <select aria-label="Select a previous scoring revision" value={selectedRevision} onChange={(event) => setSelectedRevision(event.target.value)} disabled={!previousRevisions.length || busy}>
+            {!previousRevisions.length ? <option value="">No earlier revisions</option> : null}
+            {previousRevisions.map((entry) => <option key={entry.revision} value={entry.revision}>Revision {entry.revision}</option>)}
+          </select>
+          <button type="button" onClick={loadSelectedRevision} disabled={!selectedRevision || busy || loading} title="Load an earlier revision into the editor without applying it">
+            <ArrowLeft size={14} /> Load Revision
+          </button>
+        </div>
       </div>
       <p className="point-config-subtitle">Global scoring rules</p>
       {loading ? <p className="muted point-config-state">Loading point values…</p> : null}

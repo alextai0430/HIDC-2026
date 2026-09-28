@@ -18,7 +18,6 @@ export async function POST(req: Request) {
     const input = op.parse(await req.json());
     let payload: unknown;
     if (input.kind === "put_event") {
-      if (profile.slot > 3) throw new Error("Technical slot required");
       const e = z
         .object({
           id: z.string().uuid(),
@@ -35,10 +34,8 @@ export async function POST(req: Request) {
         throw new Error("Invalid trick");
       payload = e;
     } else if (input.kind === "delete_event") {
-      if (profile.slot > 3) throw new Error("Technical slot required");
       payload = z.object({ id: z.string().uuid() }).parse(input.payload);
     } else if (input.kind === "performance") {
-      if (profile.slot < 4) throw new Error("Performance slot required");
       payload = z
         .object({
           values: z.array(z.number().min(0).max(5).multipleOf(0.5)).length(6),

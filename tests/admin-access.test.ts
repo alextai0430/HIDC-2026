@@ -249,6 +249,25 @@ test("management, review, and audit reject judges 2–5 before database access",
   }
 });
 
+test("division creation reports an existing division clearly instead of surfacing a database key error", async () => {
+  let inserts = 0;
+  const builder: any = {
+    select: () => builder,
+    eq: () => builder,
+    maybeSingle: async () => ({ data: { name: "Exhibition" }, error: null }),
+    insert: async () => {
+      inserts += 1;
+      return { error: { code: "23505", message: "duplicate key value violates unique constraint divisions_pkey" } };
+    },
+  };
+  const response = await route("manage", alex, { from: () => builder }).POST(
+    request({ action: "division", data: { name: "Exhibition" } }),
+  );
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /already exists.*Division list/i);
+  assert.equal(inserts, 0, "duplicate preflight must prevent an insert");
+});
+
 test("Judge 1 submits technical scores with unchanged attribution; backup organizer cannot score", async () => {
   const calls: any[] = [];
   const client = {
@@ -306,12 +325,18 @@ test("both administrators can activate, lock, review and create divisions", asyn
         calls.push(args);
         return {};
       },
-      from: (table: string) => ({
-        insert: async (data: unknown) => {
-          calls.push([table, data]);
-          return {};
-        },
-      }),
+      from: (table: string) => {
+        const builder: any = {
+          select: () => builder,
+          eq: () => builder,
+          maybeSingle: async () => ({ data: null, error: null }),
+          insert: async (data: unknown) => {
+            calls.push([table, data]);
+            return { error: null };
+          },
+        };
+        return builder;
+      },
     };
     for (const action of ["activate", "lock"]) {
       assert.equal(
@@ -502,9 +527,13 @@ test("state endpoint masks score data until unlock and only returns own judge po
     const hiddenBody = await response.json();
     assert.equal(hiddenBody.pointAccess, false);
     for (const submission of hiddenBody.submissions) {
-      assert.equal(submission.total, undefined);
-      assert.deepEqual(submission.performance, []);
+      const ownPerformance = p.role === "judge" && submission.user_id === p.id && (submission.scoring_type ?? (submission.slot > 3 ? "performance" : "technical")) === "performance";
+      assert.equal(submission.total, ownPerformance ? 30 : undefined);
+      assert.deepEqual(submission.performance, ownPerformance ? [5, 5, 5, 5, 5, 5] : []);
       assert.equal(submission.events[0].value, undefined);
+    }
+    if (p.role === "judge" && (p.slot ?? 0) > 3 && !access.isAdministrator(p)) {
+      assert.equal(hiddenBody.personal[0].total, 30);
     }
     if (access.isAdministrator(p)) {
       assert.equal(hiddenBody.protected, true);
@@ -546,12 +575,12 @@ test("state endpoint masks score data until unlock and only returns own judge po
       assert.equal(saved.total, 9);
       assert.equal(saved.events[0].value, 9);
     }
-    const ownExport = personalScoreExportRows(p, visibleBody.submissions, [competitor]);
+    const ownExport = personalScoreExportRows(p, visibleBody.submissions, [competitor], true);
     if (p.slot !== null && p.slot <= 3 && ownExport.length > 0) {
       const technicalExport = ownExport[0];
       assert.ok("Events" in technicalExport);
       assert.equal(technicalExport.Total, 9);
-      assert.equal(JSON.parse(technicalExport.Events)[0].points, 9);
+      assert.equal((JSON.parse(technicalExport.Events as string) as any)[0].points, 9);
     }
     if (access.isAdministrator(p)) {
       assert.equal(visibleBody.submissions.length, 5);
@@ -609,6 +638,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
     };
     let config = { revision: 1, rules: structuredClone(DEFAULT_SCORING_RULES) };
     const rpcCalls: unknown[][] = [];
+    const auditRows: any[] = [];
     const client = {
       from(table: string) {
         let data: any[] = table === "scoring_configuration"
@@ -617,6 +647,8 @@ test("technical point configuration requires the allowlist and active Admin unlo
             ? [submission]
             : table === "competitors"
               ? [competitor]
+              : table === "audit"
+                ? auditRows
               : [];
         const builder: any = {
           select: () => builder,
@@ -629,6 +661,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
             return builder;
           },
           order: () => builder,
+          limit: () => builder,
           maybeSingle: async () => ({ data: data[0] ?? null, error: null }),
           then: (resolve: (result: unknown) => unknown, reject: (reason: unknown) => unknown) =>
             Promise.resolve({ data, error: null }).then(resolve, reject),
@@ -637,6 +670,11 @@ test("technical point configuration requires the allowlist and active Admin unlo
       },
       rpc: async (name: string, args: Record<string, any>) => {
         rpcCalls.push([name, args]);
+        auditRows.push({
+          created_at: new Date().toISOString(),
+          action: "scoring_configuration_update",
+          prior: { revision: config.revision, rules: structuredClone(config.rules) },
+        });
         config = { revision: config.revision + 1, rules: args.p_rules };
         return {
           data: {
@@ -661,7 +699,9 @@ test("technical point configuration requires the allowlist and active Admin unlo
         }),
       );
       assert.equal(response.status, 200);
-      assert.equal((await response.json()).revision, 1);
+      const body = await response.json();
+      assert.equal(body.revision, 1);
+      assert.deepEqual(body.previousRevisions, []);
     }
     for (const account of [...judges, { ...alex, username: "serverjudge1", role: "server_admin" as const }]) {
       const token = createAdminUnlockToken(account.id);
@@ -729,6 +769,13 @@ test("technical point configuration requires the allowlist and active Admin unlo
     assert.equal(rpcCalls.length, 1);
     assert.equal(config.revision, 2);
     assert.deepEqual(submission.events, [savedEvent], "rule changes preserve score selections and timestamps");
+    const restoredHistory = await route("scoring-configuration", alex, client).GET(
+      new Request("http://localhost/api/scoring-configuration", {
+        headers: { "x-hidc-admin-unlock": token },
+      }),
+    );
+    assert.equal(restoredHistory.status, 200);
+    assert.deepEqual((await restoredHistory.json()).previousRevisions.map((entry: any) => entry.revision), [1]);
   } finally {
     if (originalSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSecret;
@@ -796,7 +843,7 @@ test("detail and export scopes exclude other judges and numeric values for ordin
       competitor,
     ]);
     assert.equal(personalExport.length, own.length);
-    assert.ok(personalExport.every((row) => row.Total === 20.4));
+    assert.ok(personalExport.every((row) => row.Total === "***"));
     assert.ok(!JSON.stringify(personalExport).includes("judge1"));
   }
   assert.equal(detailSubmissions(alex, records).length, 3);
@@ -807,6 +854,30 @@ test("detail and export scopes exclude other judges and numeric values for ordin
     personalScoreExportRows(organizer, records, [competitor]).length,
     0,
   );
+});
+
+test("a performance judge can see and export only their own performance values without Admin unlock", () => {
+  const competitor = {
+    id: crypto.randomUUID(), name: "One", division: "Individual Open", position: 1,
+    status: "locked" as const, archived: false, dq: false,
+  };
+  const judge = judges[0];
+  const ownPerformance: Submission = {
+    id: crypto.randomUUID(), competitor_id: competitor.id, user_id: judge.id,
+    slot: judge.slot!, scoring_type: "performance", events: [],
+    performance: [5, 4, 3, 2, 1, 0], total: 15, finished: true, dq: false,
+    version: 1, updated_at: new Date().toISOString(),
+  };
+  const otherPerformance = { ...ownPerformance, id: crypto.randomUUID(), user_id: judges[1].id, total: 30 };
+  const visible = detailSubmissions(judge, [ownPerformance, otherPerformance]);
+  assert.deepEqual(visible, [ownPerformance]);
+  const detail = detailExportRows(judge, visible, [competitor]);
+  assert.equal(detail[0].Total, 15);
+  assert.equal(detail[0].Performance, "5 / 4 / 3 / 2 / 1 / 0");
+  assert.doesNotMatch(JSON.stringify(detail), new RegExp(otherPerformance.user_id));
+  const personal = personalScoreExportRows(judge, visible, [competitor]);
+  assert.equal(personal[0].Total, 15);
+  assert.equal((personal[0] as Record<string, unknown>).Control, 5);
 });
 
 test("admin judge creates six-character-password judges and edits ordinary accounts without granting admin", async () => {
@@ -950,4 +1021,23 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
   await storage.writeLocal(alex.id, workspace);
   assert.deepEqual(stored, cached);
   assert.deepEqual(await storage.readLocal(alex.id), cached);
+});
+
+test("offline storage preserves only the signed-in performance judge's own rating values", () => {
+  const judge: Profile = { ...judges[2], slot: 2 };
+  const ownPerformance: Submission = {
+    id: crypto.randomUUID(), competitor_id: crypto.randomUUID(), user_id: judge.id,
+    slot: 2, scoring_type: "performance", events: [], performance: [4, 3, 2, 1, 0, 5],
+    total: 15, finished: true, dq: false, version: 1, updated_at: new Date().toISOString(),
+  };
+  const cached = sanitizeWorkspace({
+    snapshot: {
+      profile: judge, competitors: [], submissions: [ownPerformance], protected: false,
+      personal: [{ competitor_id: ownPerformance.competitor_id, rank: 1, total: 15 }],
+    },
+    queue: [],
+  });
+  assert.deepEqual(cached.snapshot.submissions[0].performance, ownPerformance.performance);
+  assert.equal(cached.snapshot.submissions[0].total, 15);
+  assert.equal(cached.snapshot.personal?.[0].total, 15);
 });

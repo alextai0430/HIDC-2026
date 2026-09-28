@@ -12,7 +12,7 @@ export function eventScore(e: Event, rules: ScoringRules) {
 export function total(s: Submission, rules: ScoringRules) {
   return s.dq
     ? 0
-    : s.slot <= 3
+    : (s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) === "technical"
       ? s.events.reduce((v, e) => v + eventScore(e, rules), 0)
       : s.performance.reduce((a, b) => a + b, 0);
 }
@@ -20,29 +20,44 @@ export function rankGlobal(
   competitors: Competitor[],
   submissions: Submission[],
   rules: ScoringRules,
+  assignments?: { division: string; slot: number; user_id: string; scoring_type?: "technical" | "performance" }[],
 ): Ranking[] {
   const rows = competitors
     .filter((c) => !c.archived && c.division !== "Exhibition")
     .map((c) => {
-      const slots = [1, 2, 3, 4, 5].map((slot) =>
-        submissions.find(
-          (s) => s.competitor_id === c.id && s.slot === slot && s.finished,
-        ),
-      );
+      const divisionAssignments = assignments
+        ? assignments.filter((assignment) => assignment.division === c.division).sort((a, b) => a.slot - b.slot)
+        : [...new Map(submissions
+            .filter((submission) => competitors.find((candidate) => candidate.id === submission.competitor_id)?.division === c.division)
+            .map((submission) => [submission.user_id, {
+              division: c.division,
+              slot: submission.slot,
+              user_id: submission.user_id,
+              scoring_type: submission.scoring_type ?? (submission.slot <= 3 ? "technical" : "performance"),
+            }])).values()];
+      const slots = divisionAssignments.map((assignment) => submissions.find(
+        (s) => s.competitor_id === c.id && s.user_id === assignment.user_id && s.finished,
+      ));
       const values = slots.map((s) => (s ? total(s, rules) : null));
-      const complete = slots.every(Boolean);
+      const technicalIndexes = divisionAssignments.flatMap((assignment, index) =>
+        (assignment.scoring_type ?? (assignment.slot <= 3 ? "technical" : "performance")) === "technical" ? [index] : [],
+      );
+      const performanceIndexes = divisionAssignments.flatMap((assignment, index) =>
+        (assignment.scoring_type ?? (assignment.slot <= 3 ? "technical" : "performance")) === "performance" ? [index] : [],
+      );
+      const technicalValues = technicalIndexes.map((index) => values[index]);
+      const performanceValues = performanceIndexes.map((index) => values[index]);
+      const complete = divisionAssignments.length >= 2 && technicalIndexes.length > 0 && performanceIndexes.length > 0 && slots.every(Boolean);
+      const mean = (scores: (number | null)[]) => scores.length && scores.every((score) => score !== null)
+        ? scores.reduce<number>((sum, score) => sum + (score ?? 0), 0) / scores.length
+        : null;
       return {
         competitor: c,
-        technical: values.slice(0, 3),
-        performance: values.slice(3),
-        raw: values.slice(0, 3).every((v) => v !== null)
-          ? values.slice(0, 3).reduce<number>((a, b) => a + (b ?? 0), 0)
-          : null,
+        technical: technicalValues,
+        performance: performanceValues,
+        raw: mean(technicalValues),
         scaled: null,
-        average:
-          values[3] !== null && values[4] !== null
-            ? (values[3] + values[4]) / 2
-            : null,
+        average: mean(performanceValues),
         final: null,
         complete,
         dq: c.dq || submissions.some((s) => s.competitor_id === c.id && s.dq),

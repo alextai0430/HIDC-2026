@@ -33,9 +33,10 @@ export async function POST(req: Request) {
       const input = z.object({
         division: z.string().trim().min(1).max(80),
         assignments: z.array(z.object({
-          slot: z.number().int().min(1).max(5),
+          slot: z.number().int().min(1).max(10),
           user_id: z.string().uuid(),
-        })).length(5),
+          scoring_type: z.enum(["technical", "performance"]),
+        })).min(2).max(10),
       }).parse(data);
       const { error } = await client.rpc("manage_judge_assignments", {
         p_actor: profile.id,
@@ -45,7 +46,11 @@ export async function POST(req: Request) {
       if (error) throw new Error(error.message);
     } else if (action === "division") {
       const name = z.string().trim().min(1).max(80).parse(data.name);
+      const existing = await client.from("divisions").select("name").eq("name", name).maybeSingle();
+      if (existing.error) throw new Error(existing.error.message);
+      if (existing.data) throw new Error("That division already exists. Select it from the Division list instead.");
       const { error } = await client.from("divisions").insert({ name });
+      if (error?.code === "23505") throw new Error("That division already exists. Select it from the Division list instead.");
       if (error) throw new Error(error.message);
       const audit = await client.from("audit").insert({
         user_id: profile.id,
@@ -56,6 +61,13 @@ export async function POST(req: Request) {
         throw new Error(
           "Division created, but audit logging failed. Contact the organizer.",
         );
+    } else if (action === "delete") {
+      const input = z.object({ id: z.string().uuid() }).parse(data);
+      const { error } = await client.rpc("delete_competitor", {
+        p_actor: profile.id,
+        p_id: input.id,
+      });
+      if (error) throw new Error(error.message);
     } else if (action === "user") {
       const u = z
         .object({

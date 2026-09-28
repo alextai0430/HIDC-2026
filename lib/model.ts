@@ -80,12 +80,16 @@ export type ScoringConfiguration = {
   revision: number;
   dataRevision: number;
   rules: ScoringRules;
+  previousRevisions?: { revision: number; updatedAt: string | null; rules: ScoringRules }[];
 };
 export type Submission = {
   id: string;
   competitor_id: string;
   user_id: string;
   slot: number;
+  // The score type is assigned per division and may differ from the judge's
+  // legacy profile slot. Missing values on old offline snapshots fall back to slot.
+  scoring_type?: "technical" | "performance";
   events: Event[];
   performance: number[];
   finished: boolean;
@@ -115,7 +119,12 @@ export type Snapshot = {
   audit?: Record<string, unknown>[];
   rankings?: Ranking[];
   personal?: { competitor_id: string; rank: number; total?: number }[];
-  assignments?: { division: string; slot: number; user_id: string }[];
+  assignments?: {
+    division: string;
+    slot: number;
+    user_id: string;
+    scoring_type?: "technical" | "performance";
+  }[];
   // True only when the server accepted this page's in-memory Admin unlock token.
   pointAccess?: boolean;
   // Safe non-numeric version metadata; used to flag stale offline queues.

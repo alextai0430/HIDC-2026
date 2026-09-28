@@ -113,6 +113,7 @@ export function calculateScoringConfigurationImpact(
   newRules: ScoringRules,
   submissions: Submission[],
   competitors: Competitor[],
+  assignments?: { division: string; slot: number; user_id: string; scoring_type?: "technical" | "performance" }[],
 ): ScoringConfigurationImpact {
   const competitorById = new Map(competitors.map((competitor) => [competitor.id, competitor]));
   const affectedSubmissionIds = new Set<string>();
@@ -120,7 +121,7 @@ export function calculateScoringConfigurationImpact(
   let technicalEventValues = 0;
 
   for (const submission of submissions) {
-    if (submission.slot > 3) continue;
+    if ((submission.scoring_type ?? (submission.slot <= 3 ? "technical" : "performance")) !== "technical") continue;
     for (const event of submission.events) {
       if (eventScore(event, oldRules) === eventScore(event, newRules)) continue;
       technicalEventValues++;
@@ -141,12 +142,14 @@ export function calculateScoringConfigurationImpact(
       (competitor) => competitor.division === division && !competitor.archived,
     );
     for (const competitor of divisionCompetitors) {
-      const finishedSlots = new Set(
-        submissions
-          .filter((submission) => submission.competitor_id === competitor.id && submission.finished)
-          .map((submission) => submission.slot),
-      );
-      if ([1, 2, 3, 4, 5].every((slot) => finishedSlots.has(slot))) {
+      const judges = assignments?.filter((assignment) => assignment.division === division)
+        ?? [...new Map(submissions
+          .filter((submission) => competitorById.get(submission.competitor_id)?.division === division)
+          .map((submission) => [submission.user_id, { user_id: submission.user_id }])).values()];
+      const finishedJudges = new Set(submissions
+        .filter((submission) => submission.competitor_id === competitor.id && submission.finished)
+        .map((submission) => submission.user_id));
+      if (judges.length >= 2 && judges.every((judge) => finishedJudges.has(judge.user_id))) {
         finalizedCompetitors.add(competitor.id);
       }
     }

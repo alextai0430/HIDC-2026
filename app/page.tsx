@@ -1,4 +1,5 @@
 "use client";
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -49,6 +50,7 @@ import {
   Operation,
   Profile,
   Snapshot,
+  Submission,
   tricks,
 } from "@/lib/model";
 import { download } from "@/lib/export";
@@ -60,6 +62,7 @@ import {
   detailSubmissions,
   ownSubmissions,
   personalScoreExportRows,
+  canViewOwnPerformancePoints,
 } from "@/lib/scoped";
 
 const defaultKeys: Record<string, string> = {
@@ -94,6 +97,17 @@ const defaultKeys: Record<string, string> = {
 };
 const fmt = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
 const uid = () => crypto.randomUUID();
+type ScoringType = "technical" | "performance";
+type JudgeAssignment = { division: string; slot: number; user_id: string; scoring_type?: ScoringType };
+const profileScoringType = (profile?: Profile | null): ScoringType => (profile?.slot ?? 1) <= 3 ? "technical" : "performance";
+const assignmentScoringType = (assignment?: JudgeAssignment, profile?: Profile): ScoringType =>
+  assignment?.scoring_type ?? (assignment ? (assignment.slot <= 3 ? "technical" : "performance") : profileScoringType(profile));
+function defaultScoreTab(snapshot: Snapshot) {
+  if (canManage(snapshot.profile)) return "Server Access Control";
+  const active = snapshot.competitors.find((competitor) => competitor.status === "active" && !competitor.archived);
+  const assignment = active && snapshot.assignments?.find((row) => row.division === active.division && row.user_id === snapshot.profile.id);
+  return assignmentScoringType(assignment, snapshot.profile) === "performance" ? "Performance" : "Technical";
+}
 const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
   const sampleJudges = [1, 2, 3, 4, 5].map((judgeSlot): Profile => ({
     id: `demo-user-${judgeSlot}`,
@@ -116,6 +130,7 @@ const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
       competitor_id: finishedSample.id,
       user_id: judge.id,
       slot: judge.slot!,
+      scoring_type: judge.slot! <= 3 ? "technical" as const : "performance" as const,
       events: [],
       performance: [3, 3, 3, 3, 3, 3],
       finished: true,
@@ -129,6 +144,7 @@ const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
       competitor_id: activeSample.id,
       user_id: sampleJudges[0].id,
       slot: 1,
+      scoring_type: "technical" as const,
       events: [{ id: "demo-event-progress", trick: "T 2D", level: 2, features: [], at: timestamp }],
       performance: [0, 0, 0, 0, 0, 0],
       finished: false,
@@ -150,7 +166,7 @@ const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
     protected: role === "server_admin",
     profiles: sampleJudges,
     assignments: allDemoDivisions.map((division) =>
-      sampleJudges.map((judge) => ({ division, slot: judge.slot!, user_id: judge.id })),
+      sampleJudges.map((judge) => ({ division, slot: judge.slot!, user_id: judge.id, scoring_type: judge.slot! <= 3 ? "technical" as const : "performance" as const })),
     ).flat(),
     audit: [],
     rankings: [],
@@ -172,8 +188,8 @@ export default function Page() {
     [scoringReconciliationNotice, setScoringReconciliationNotice] = useState(""),
     [notice, setNotice] = useState(""),
     [tab, setTab] = useState("Technical"),
-    [technicalViewSlot, setTechnicalViewSlot] = useState(1),
-    [performanceViewSlot, setPerformanceViewSlot] = useState(4),
+    [technicalViewJudgeId, setTechnicalViewJudgeId] = useState(""),
+    [performanceViewJudgeId, setPerformanceViewJudgeId] = useState(""),
     [selected, setSelected] = useState<string | null>(null),
     [theme, setTheme] = useState("light");
   const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
@@ -202,6 +218,8 @@ export default function Page() {
       title: string;
       body: string;
       action: () => void;
+      confirmLabel?: string;
+      danger?: boolean;
     } | null>(null);
   const [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
@@ -217,7 +235,7 @@ export default function Page() {
     [adminTabPasswordMessage, setAdminTabPasswordMessage] = useState(""),
     [filter, setFilter] = useState("All divisions"),
     [assignmentDivision, setAssignmentDivision] = useState(divisions[0]),
-    [assignmentDraft, setAssignmentDraft] = useState<Record<string, string>>({}),
+    [assignmentDraft, setAssignmentDraft] = useState<Record<string, { user_id: string; scoring_type: ScoringType }> | null>(null),
     [competitorEdit, setCompetitorEdit] = useState<Partial<Competitor> | null>(
       null,
     ),
@@ -229,28 +247,40 @@ export default function Page() {
   const server = !!profile && canManage(profile);
   const canManageScoringConfig = !!profile && canManageScoringConfiguration(profile);
   const organizer = profile?.role === "server_admin";
-  const technical = (profile?.slot ?? 1) <= 3;
   const canViewPoints =
     adminUnlocked && showPoints && !!adminUnlockToken && state?.pointAccess === true;
-  const viewingSlot = server
-    ? tab === "Performance"
-      ? performanceViewSlot
-      : technicalViewSlot
-    : (profile?.slot ?? 1);
+  const canViewSubmissionPoints = (submission?: Submission) =>
+    !!submission && (canViewPoints || (!!profile && canViewOwnPerformancePoints(profile, submission)));
+  const canViewPersonalPoints = (competitorId: string) =>
+    canViewPoints || !!profile && !!state?.submissions.some((submission) => submission.competitor_id === competitorId && canViewOwnPerformancePoints(profile, submission));
   const active = state?.competitors.find(
     (c) => c.status === "active" && !c.archived,
   );
   const current = state?.competitors.find(
     (c) => c.id === (selected ?? active?.id),
   );
+  const currentAssignment = state?.assignments?.find(
+    (assignment) => assignment.division === current?.division && assignment.user_id === profile?.id,
+  );
+  const technical = server
+    ? tab !== "Performance"
+    : assignmentScoringType(currentAssignment, profile) === "technical";
+  const currentRoleAssignments = (state?.assignments ?? [])
+    .filter((assignment) => assignment.division === current?.division && assignmentScoringType(assignment, state?.profiles?.find((judge) => judge.id === assignment.user_id)) === (tab === "Performance" ? "performance" : "technical"))
+    .sort((a, b) => a.slot - b.slot);
+  const selectedJudgeId = server
+    ? (tab === "Performance" ? performanceViewJudgeId : technicalViewJudgeId)
+    : profile?.id ?? "";
+  const viewingJudgeId = currentRoleAssignments.some((assignment) => assignment.user_id === selectedJudgeId)
+    ? selectedJudgeId
+    : currentRoleAssignments[0]?.user_id ?? selectedJudgeId;
   const own = state?.submissions.find(
     (s) => s.competitor_id === current?.id && s.user_id === profile?.id,
   );
   const displayed = state?.submissions.find(
     (s) =>
       s.competitor_id === current?.id &&
-      s.slot === viewingSlot &&
-      (server || s.user_id === profile?.id),
+      s.user_id === viewingJudgeId,
   );
   const visibleSubmissions =
     profile && state ? detailSubmissions(profile, state.submissions) : [];
@@ -259,14 +289,10 @@ export default function Page() {
   const canScore =
     !!profile &&
     isAssignedJudge(profile) &&
-    profile.slot === viewingSlot &&
-    ((tab === "Technical" && profile.slot <= 3) ||
-      (tab === "Performance" && profile.slot >= 4)) &&
+    !!currentAssignment &&
+    assignmentScoringType(currentAssignment, profile) === (tab === "Performance" ? "performance" : "technical") &&
     !!current &&
     !current.archived &&
-    (server || !state.assignments || state.assignments.some(
-      (a) => a.division === current.division && a.user_id === profile.id && a.slot === profile.slot,
-    )) &&
     (current.status === "active" || !!own);
   const allDivisions = Array.from(
     new Set([
@@ -290,9 +316,16 @@ export default function Page() {
   const divisionProfiles = (state?.profiles ?? []).filter(
     (p) => p.active && p.role === "judge",
   );
-  const currentAssignmentDraft = Object.fromEntries(
-    divisionAssignments.map((a) => [String(a.slot), a.user_id]),
+  const currentAssignmentDraft: Record<string, { user_id: string; scoring_type: ScoringType }> = Object.fromEntries(
+    divisionAssignments.map((a) => [String(a.slot), {
+      user_id: a.user_id,
+      scoring_type: assignmentScoringType(a, state?.profiles?.find((judge) => judge.id === a.user_id)),
+    }]),
   );
+  const editableAssignments = assignmentDraft ?? currentAssignmentDraft;
+  const editableAssignmentRows = Object.entries(editableAssignments)
+    .map(([slot, row]) => ({ slot: Number(slot), ...row }))
+    .sort((a, b) => a.slot - b.slot);
   const nextUpcoming = [...(state?.competitors ?? [])]
     .filter((c) => c.status === "upcoming" && !c.archived)
     .sort((a, b) => a.position - b.position)[0];
@@ -314,6 +347,7 @@ export default function Page() {
         return {
           ...judge,
           name: judgeProfile?.name ?? `Judge ${judge.slot}`,
+          scoring_type: assignmentScoringType(judge, judgeProfile),
           status: submission?.finished
             ? "Finished"
             : submission && submission.version > 0
@@ -321,7 +355,7 @@ export default function Page() {
               : "Not started",
         };
       });
-      const complete = entries.length === 5 && entries.every((entry) => entry.status === "Finished");
+      const complete = entries.length >= 2 && entries.some((entry) => entry.scoring_type === "technical") && entries.some((entry) => entry.scoring_type === "performance") && entries.every((entry) => entry.status === "Finished");
       const started = entries.some((entry) => entry.status !== "Not started");
       return {
         competitor,
@@ -331,6 +365,10 @@ export default function Page() {
         stateLabel: complete ? "Complete" : competitor.status === "active" ? "Active · in progress" : started ? "Started · incomplete" : "Not started · locked",
       };
     });
+  const validProgressAssignments = (entries: { scoring_type: ScoringType }[]) =>
+    entries.length >= 2 && entries.length <= 10 &&
+    entries.some((entry) => entry.scoring_type === "technical") &&
+    entries.some((entry) => entry.scoring_type === "performance");
   const previewAppearance = useCallback((preferences: AppearancePreferences) => {
     const effective = preferences.mode === "system"
       ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
@@ -383,7 +421,7 @@ export default function Page() {
       const ownSubmissions = next.snapshot.submissions.filter((submission) => submission.user_id === viewer.id);
       const ownCompetitorIds = new Set(ownSubmissions.map((submission) => submission.competitor_id));
       const allowedActiveDivisions = new Set((next.snapshot.assignments ?? [])
-        .filter((assignment) => assignment.user_id === viewer.id && assignment.slot === viewer.slot)
+          .filter((assignment) => assignment.user_id === viewer.id)
         .map((assignment) => assignment.division));
       next = {
         ...next,
@@ -559,23 +597,14 @@ export default function Page() {
           const id = localStorage.getItem("hidc-demo-user") ?? "demo-user-1";
           const local = await readLocal(id);
           await commit(local ?? { snapshot: blankDemo(), queue: [] });
-          if (local?.snapshot.profile.role === "server_admin")
-            setTab("Server Access Control");
-          if (local?.snapshot.profile.slot && local.snapshot.profile.slot > 3)
-            setTab("Performance");
+          if (local) setTab(defaultScoreTab(local.snapshot));
         } else {
           if (!navigator.onLine) {
             const id = localStorage.getItem("hidc-last-user");
             const cached = id ? await readLocal(id) : undefined;
             if (cached) {
               await commit(cached);
-              setTab(
-                cached.snapshot.profile.role === "server_admin"
-                  ? "Server Access Control"
-                  : (cached.snapshot.profile.slot ?? 1) > 3
-                    ? "Performance"
-                    : "Technical",
-              );
+              setTab(defaultScoreTab(cached.snapshot));
             }
             return;
           }
@@ -584,20 +613,12 @@ export default function Page() {
             const local = await readLocal(session.data.session.user.id);
             if (local) {
               await commit(local);
-              if (local.snapshot.profile.role === "server_admin")
-                setTab("Server Access Control");
-              if ((local.snapshot.profile.slot ?? 1) > 3) setTab("Performance");
+              setTab(defaultScoreTab(local.snapshot));
             }
             if (navigator.onLine && !local?.queue.length) {
               const snapshot: Snapshot = await api("state");
               await commit({ snapshot, queue: [] });
-              setTab(
-                snapshot.profile.role === "server_admin"
-                  ? "Server Access Control"
-                  : (snapshot.profile.slot ?? 1) > 3
-                    ? "Performance"
-                    : "Technical",
-              );
+              setTab(defaultScoreTab(snapshot));
             }
           }
         }
@@ -831,13 +852,7 @@ export default function Page() {
       const snapshot: Snapshot = await api("state");
       const local = await readLocal(snapshot.profile.id);
       await commit(local?.queue.length ? local : { snapshot, queue: [] });
-      setTab(
-        snapshot.profile.role === "server_admin"
-          ? "Server Access Control"
-          : snapshot.profile.slot! > 3
-            ? "Performance"
-            : "Technical",
-      );
+      setTab(defaultScoreTab(snapshot));
       setPassword("");
       setSyncError("");
     } catch (e) {
@@ -1145,6 +1160,13 @@ export default function Page() {
         } else if (action === "lock") {
           next.snapshot.competitors.find((c) => c.id === d.id)!.status =
             "locked";
+        } else if (action === "delete") {
+          const target = data as { id: string };
+          next.snapshot.competitors = next.snapshot.competitors.filter((competitor) => competitor.id !== target.id);
+          next.snapshot.submissions = next.snapshot.submissions.filter((submission) => submission.competitor_id !== target.id);
+          next.snapshot.competitors
+            .sort((a, b) => a.position - b.position)
+            .forEach((competitor, index) => { competitor.position = index + 1; });
         } else if (action === "save") {
           const index = next.snapshot.competitors.findIndex(
             (c) => c.id === d.id,
@@ -1152,7 +1174,7 @@ export default function Page() {
           if (index < 0) next.snapshot.competitors.push({ ...d, id: uid() });
           else next.snapshot.competitors[index] = d;
         } else if (action === "assignments") {
-          const assignment = data as { division: string; assignments: { slot: number; user_id: string }[] };
+          const assignment = data as { division: string; assignments: { slot: number; user_id: string; scoring_type: ScoringType }[] };
           next.snapshot.assignments = [
             ...(next.snapshot.assignments ?? []).filter((row) => row.division !== assignment.division),
             ...assignment.assignments.map((row) => ({ ...row, division: assignment.division })),
@@ -1168,7 +1190,7 @@ export default function Page() {
       }
       setCompetitorEdit(null);
       setUserEdit(null);
-      setNotice("Changes saved");
+      setNotice(action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
       return true;
     } catch (e) {
       setSyncError((e as Error).message);
@@ -1179,6 +1201,10 @@ export default function Page() {
     e.preventDefault();
     const name = newDivision.trim();
     if (!name) return;
+    if (allDivisions.some((division) => division.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setSyncError("That division already exists. Select it from the Division list instead.");
+      return;
+    }
     if (await manage("division", { name })) {
       setNewDivision("");
       setDivisionFormOpen(false);
@@ -1195,13 +1221,7 @@ export default function Page() {
     setAdminUnlocked(false);
     setShowPoints(false);
     setSelected(null);
-    setTab(
-      role === "server_admin"
-        ? "Server Access Control"
-        : slot > 3
-          ? "Performance"
-          : "Technical",
-    );
+    setTab(defaultScoreTab(local?.snapshot ?? snapshot));
     clear();
   }
   const exportPersonal = (format: "csv" | "txt", ranked: boolean) => {
@@ -1209,7 +1229,7 @@ export default function Page() {
       .map((r) => {
         const c = state!.competitors.find((c) => c.id === r.competitor_id)!;
         return {
-          Rank: r.rank,
+      Rank: r.rank,
           Competitor: c.name,
           Division: c.division,
           Order: c.position,
@@ -1217,7 +1237,7 @@ export default function Page() {
             state!.submissions.find(
               (s) => s.competitor_id === c.id && s.user_id === profile?.id,
             )?.submitted_at ?? "",
-          ...(technical ? {} : { Score: canViewPoints ? r.total : "***" }),
+          ...(technical ? {} : { Score: canViewPersonalPoints(r.competitor_id) ? r.total : "***" }),
         };
       })
       .filter((r) => filter === "All divisions" || r.Division === filter)
@@ -1254,7 +1274,7 @@ export default function Page() {
       <main className="login" data-theme="light">
         <div className="login-card">
           <div className="brand">
-            <img
+            <Image
               className="brand-logo"
               src="/ndl-emblem.jpg"
               width={56}
@@ -1268,11 +1288,6 @@ export default function Page() {
           <span className="eyebrow">
             HOUSTON INTERNATIONAL DIABOLO COMPETITION
           </span>
-          <h1>Judge Sign In</h1>
-          <p className="login-help">
-            Use the username and password provided by the event organizer.
-            <br />Need access help? Contact the organizer.
-          </p>
           <form onSubmit={login}>
             <label>
               Username
@@ -1307,7 +1322,9 @@ export default function Page() {
     ...(server
       ? ["Technical", "Performance"]
       : profile?.role === "judge"
-        ? [technical ? "Technical" : "Performance"]
+        ? [...new Set((state?.assignments ?? [])
+            .filter((assignment) => assignment.user_id === profile.id && assignment.division === active?.division)
+            .map((assignment) => assignmentScoringType(assignment, profile) === "technical" ? "Technical" : "Performance"))]
         : []),
     "Score Details",
     "Saved Competitors",
@@ -1346,10 +1363,10 @@ export default function Page() {
           {appearance.template === "sidebar-workspace" ? (
             <button
               type="button"
-              className="sidebar-toggle"
-              aria-label={appearance.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-              title={appearance.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-              aria-pressed={appearance.sidebarCollapsed}
+              className="sidebar-toggle navigation-toggle"
+              aria-label={appearance.sidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
+              aria-expanded={!appearance.sidebarCollapsed}
+              aria-controls="app-navigation"
               onClick={() => {
                 const next = { ...appearance, sidebarCollapsed: !appearance.sidebarCollapsed };
                 previewAppearance(next);
@@ -1407,7 +1424,11 @@ export default function Page() {
           </button>
         </div>
       </header>
-      <nav>
+      <nav
+        id="app-navigation"
+        aria-label="Main navigation"
+        className={`navigation-menu ${appearance.template === "sidebar-workspace" && !appearance.sidebarCollapsed ? "sidebar-open" : ""}`}
+      >
         {nav.map((name) => (
           <button
             key={name}
@@ -1586,21 +1607,18 @@ export default function Page() {
                     View judge{" "}
                     <select
                       aria-label="View judge submission"
-                      value={viewingSlot}
+                      value={viewingJudgeId}
                       onChange={(e) => {
-                        const slot = Number(e.target.value);
-                        if (tab === "Technical") setTechnicalViewSlot(slot);
-                        else setPerformanceViewSlot(slot);
+                        if (tab === "Technical") setTechnicalViewJudgeId(e.target.value);
+                        else setPerformanceViewJudgeId(e.target.value);
                         clear();
                       }}
                     >
-                      {(tab === "Technical" ? [1, 2, 3] : [4, 5]).map(
-                        (slot) => (
-                          <option value={slot} key={slot}>
-                            Judge {slot}
+                      {currentRoleAssignments.map((assignment) => (
+                          <option value={assignment.user_id} key={assignment.user_id}>
+                            {state?.profiles?.find((candidate) => candidate.id === assignment.user_id)?.name ?? `Judge ${assignment.slot}`}
                           </option>
-                        ),
-                      )}
+                        ))}
                     </select>
                   </label>
                 )}
@@ -1913,7 +1931,7 @@ export default function Page() {
                           <h3>{category}</h3>
                         </div>
                         <strong>
-                          {canViewPoints
+                          {canViewSubmissionPoints(displayed)
                             ? (displayed?.performance[i] ?? 0).toFixed(1)
                             : "***"}
                         </strong>
@@ -1947,7 +1965,7 @@ export default function Page() {
                 <aside className="panel performance-summary">
                   <h2>Performance</h2>
                   <div className="big-total">
-                    {canViewPoints
+                    {canViewSubmissionPoints(displayed)
                       ? (displayed?.performance.reduce((a, b) => a + b, 0) ?? 0).toFixed(1)
                       : "***"}
                     <span>/ 30</span>
@@ -1955,7 +1973,7 @@ export default function Page() {
                   {categories.map((c, i) => (
                     <div className="summary-row" key={c}>
                       <span>{c}</span>
-                      <b>{canViewPoints ? (displayed?.performance[i] ?? 0).toFixed(1) : "***"}</b>
+                      <b>{canViewSubmissionPoints(displayed) ? (displayed?.performance[i] ?? 0).toFixed(1) : "***"}</b>
                     </div>
                   ))}
                 </aside>
@@ -2134,7 +2152,7 @@ export default function Page() {
                         <td>#{r.rank}</td>
                         <td>{c.name}</td>
                         <td>{c.division}</td>
-                        {!technical && <td>{canViewPoints ? fmt(r.total) : "***"}</td>}
+                        {!technical && <td>{canViewPersonalPoints(r.competitor_id) ? fmt(r.total) : "***"}</td>}
                       </tr>
                     );
                   })}
@@ -2156,7 +2174,7 @@ export default function Page() {
             <div className="panel-heading">
               <h3>Submission Details</h3>
             </div>
-            {canViewPoints && <div className="exports">
+            {(canViewPoints || personalSubmissions.some((submission) => profile && canViewOwnPerformancePoints(profile, submission))) && <div className="exports">
               {(["csv", "txt"] as const).map((format) => (
                 <button
                   key={format}
@@ -2179,7 +2197,7 @@ export default function Page() {
                 </button>
               ))}
             </div>}
-            {!canViewPoints && <p className="masked-points-note" role="status">Unlock Admin and turn on Show points to export numeric score details.</p>}
+            {!canViewPoints && <p className="masked-points-note" role="status">Unlock Admin and turn on Show Points to export full score details. Your own performance scores remain visible.</p>}
             {visibleSubmissions.map((s) => (
               <details className="submission-detail" key={s.id}>
                 <summary>
@@ -2189,11 +2207,11 @@ export default function Page() {
                         ?.name
                     }
                   </span>
-                  <span>Judge {s.slot}</span>
+                  <span>{s.scoring_type === "performance" || (s.scoring_type === undefined && s.slot > 3) ? "Performance" : "Technical"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? `Judge ${s.slot}`}</span>
                   <span>
                     {s.finished ? "Finished" : "Draft"}
                     {s.dq ? " · DQ" : ""}
-                    {canViewPoints
+                    {canViewSubmissionPoints(s)
                       ? ` · Total ${s.total === undefined ? "***" : fmt(s.total)}`
                       : " · Total ***"}
                   </span>
@@ -2254,7 +2272,7 @@ export default function Page() {
                     ? ` · Submitted ${new Date(s.submitted_at).toLocaleString()}`
                     : ""}
                 </p>
-                {s.slot < 4
+                {(s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) === "technical"
                   ? s.events.map((e, i) => (
                       <div className="detail-event" key={e.id}>
                         <b>
@@ -2272,7 +2290,7 @@ export default function Page() {
                   : categories.map((c, i) => (
                       <div className="detail-event" key={c}>
                         <span>{c}</span>
-                        <b>{canViewPoints ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
+                      <b>{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
                       </div>
                     ))}
               </details>
@@ -2391,7 +2409,7 @@ export default function Page() {
                 {showPoints ? "Hide Points" : "Show Points"}
               </button>
             </div>
-            {canViewPoints && exports((format, ranked) => {
+            {(canViewPoints || personalSubmissions.some((submission) => profile && canViewOwnPerformancePoints(profile, submission))) && exports((format, ranked) => {
               const ordered = [...personalSubmissions].sort((a, b) =>
                 ranked
                   ? (b.total ?? 0) - (a.total ?? 0)
@@ -2416,9 +2434,9 @@ export default function Page() {
                     {s.finished ? "Finished" : "Draft"}
                     {s.dq ? " · DQ" : ""}
                   </span>
-                  <span>Total {canViewPoints && s.total !== undefined ? fmt(s.total) : "***"}</span>
+                  <span>Total {canViewSubmissionPoints(s) && s.total !== undefined ? fmt(s.total) : "***"}</span>
                 </summary>
-                {s.slot < 4
+                {(s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) === "technical"
                   ? s.events.map((e, i) => (
                       <div className="detail-event" key={e.id}>
                         <span>
@@ -2430,7 +2448,7 @@ export default function Page() {
                   : categories.map((c, i) => (
                       <div className="detail-event" key={c}>
                         <span>{c}</span>
-                        <b>{canViewPoints ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
+                        <b>{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
                       </div>
                     ))}
               </details>
@@ -2502,11 +2520,7 @@ export default function Page() {
                       onChange={(event) => {
                         const nextDivision = event.target.value;
                         setAssignmentDivision(nextDivision);
-                        setAssignmentDraft(Object.fromEntries(
-                          (state.assignments ?? [])
-                            .filter((a) => a.division === nextDivision)
-                            .map((a) => [String(a.slot), a.user_id]),
-                        ));
+                        setAssignmentDraft(null);
                       }}
                     >
                       {allDivisions.map((division) => <option key={division}>{division}</option>)}
@@ -2524,7 +2538,7 @@ export default function Page() {
                   </button>
                 </div>
               </div>
-              <p>Choose five active judges, one for each scoring slot. The same group scores this division; a judge can be assigned to multiple divisions. Assignments lock after scoring starts.</p>
+              <p>Assign 2–10 active judges per division, with at least one Technical and one Performance judge. Judges may serve in multiple divisions; assignments lock after scoring starts.</p>
               {divisionFormOpen && (
                 <form className="division-add-form" onSubmit={addDivision}>
                   <label>
@@ -2537,60 +2551,80 @@ export default function Page() {
                       onChange={(event) => setNewDivision(event.target.value)}
                     />
                   </label>
+                  {newDivision.trim() && allDivisions.some((division) => division.trim().toLocaleLowerCase() === newDivision.trim().toLocaleLowerCase()) ? (
+                    <span className="division-duplicate-hint" role="status">This division already exists. Select it from the Division list.</span>
+                  ) : null}
                   <button type="button" onClick={() => setDivisionFormOpen(false)}>Cancel</button>
-                  <button className="primary" disabled={demo || !newDivision.trim()}>Save Division</button>
+                  <button className="primary" disabled={demo || !newDivision.trim() || allDivisions.some((division) => division.trim().toLocaleLowerCase() === newDivision.trim().toLocaleLowerCase())}>Save Division</button>
                 </form>
               )}
               <div className="division-assignment-grid">
-                {[1, 2, 3, 4, 5].map((slot) => {
-                  const selectedId = assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)] ?? "";
-                  const usedElsewhere = new Set([1, 2, 3, 4, 5]
-                    .filter((otherSlot) => otherSlot !== slot)
-                    .map((otherSlot) => assignmentDraft[String(otherSlot)] ?? currentAssignmentDraft[String(otherSlot)] ?? ""));
+                {editableAssignmentRows.map(({ slot, user_id, scoring_type }) => {
+                  const usedElsewhere = new Set(editableAssignmentRows.filter((row) => row.slot !== slot).map((row) => row.user_id));
+                  const updateRow = (change: Partial<{ user_id: string; scoring_type: ScoringType }>) => {
+                    setAssignmentDraft((prior) => ({ ...(prior ?? currentAssignmentDraft), [String(slot)]: { ...editableAssignments[String(slot)], ...change } }));
+                  };
                   return (
-                    <label key={slot}>
-                      {slot < 4 ? "Technical" : "Performance"} · Judge {slot}
-                      <select
-                        value={selectedId}
-                        onChange={(event) => setAssignmentDraft((prior) => ({ ...prior, [String(slot)]: event.target.value }))}
-                      >
-                        <option value="">Select assigned judge</option>
-                        {divisionProfiles.filter((p) => p.slot === slot).map((p) => (
-                          <option key={p.id} value={p.id} disabled={usedElsewhere.has(p.id)}>
-                            {p.name} · @{p.username}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <div className="assignment-judge-row" key={slot}>
+                      <b>Judge {slot}</b>
+                      <label>
+                        Scoring group
+                        <select value={scoring_type} onChange={(event) => updateRow({ scoring_type: event.target.value as ScoringType })}>
+                          <option value="technical">Technical</option>
+                          <option value="performance">Performance</option>
+                        </select>
+                      </label>
+                      <label>
+                        Judge account
+                        <select value={user_id} onChange={(event) => updateRow({ user_id: event.target.value })}>
+                          <option value="">Select assigned judge</option>
+                          {divisionProfiles.map((p) => (
+                            <option key={p.id} value={p.id} disabled={usedElsewhere.has(p.id)}>
+                              {p.name} · @{p.username}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button type="button" aria-label={`Remove Judge ${slot}`} title={`Remove Judge ${slot}`} onClick={() => {
+                        const remaining = editableAssignmentRows.filter((row) => row.slot !== slot);
+                        setAssignmentDraft(Object.fromEntries(remaining.map((row, index) => [String(index + 1), { user_id: row.user_id, scoring_type: row.scoring_type }])));
+                      }}><Trash2 size={14} /> Remove</button>
+                    </div>
                   );
                 })}
-                <button
-                  className="primary"
-                  disabled={
-                    [1, 2, 3, 4, 5].some((slot) => !(assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)])) ||
-                    new Set([1, 2, 3, 4, 5].map((slot) => assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)] ?? "")).size !== 5
-                  }
-                  onClick={() => void manage("assignments", {
-                    division: assignmentDivision,
-                    assignments: [1, 2, 3, 4, 5].map((slot) => ({
-                      slot,
-                      user_id: assignmentDraft[String(slot)] ?? currentAssignmentDraft[String(slot)],
-                    })),
-                  })}
-                >
-                  Save Judge Group
-                </button>
+                <div className="assignment-editor-actions">
+                  <button type="button" disabled={editableAssignmentRows.length >= 10} onClick={() => {
+                    const nextSlot = editableAssignmentRows.length + 1;
+                    const techCount = editableAssignmentRows.filter((row) => row.scoring_type === "technical").length;
+                    const performanceCount = editableAssignmentRows.filter((row) => row.scoring_type === "performance").length;
+                    const scoring_type = techCount === 0 ? "technical" : performanceCount === 0 ? "performance" : techCount <= performanceCount ? "technical" : "performance";
+                    setAssignmentDraft((prior) => ({ ...(prior ?? currentAssignmentDraft), [String(nextSlot)]: { user_id: "", scoring_type } }));
+                  }}><Plus size={14} /> Add Judge</button>
+                  <button
+                    className="primary"
+                    disabled={
+                      editableAssignmentRows.length < 2 || editableAssignmentRows.length > 10 ||
+                      editableAssignmentRows.some((row) => !row.user_id) ||
+                      new Set(editableAssignmentRows.map((row) => row.user_id)).size !== editableAssignmentRows.length ||
+                      !editableAssignmentRows.some((row) => row.scoring_type === "technical") ||
+                      !editableAssignmentRows.some((row) => row.scoring_type === "performance")
+                    }
+                    onClick={() => void manage("assignments", {
+                      division: assignmentDivision,
+                      assignments: editableAssignmentRows.map(({ slot, user_id, scoring_type }) => ({ slot, user_id, scoring_type })),
+                    })}
+                  >Save Judge Group</button>
+                </div>
               </div>
             </section>
             <section className="panel records progress-overview">
               <div className="panel-heading">
                 <h3>Competitor Progress</h3>
-                <span className="muted">Green only when all five assigned judges finish</span>
+                <span className="muted">Green only when all assigned judges finish</span>
               </div>
               <div className="progress-table-wrap">
                 <div className="progress-table-header" aria-hidden="true">
-                  <span>Order</span><span>Competitor · Division</span><span>Overall</span>
-                  {[1, 2, 3, 4, 5].map((slot) => <span key={slot}>Judge {slot}</span>)}
+                  <span>Order</span><span>Competitor · Division</span><span>Overall</span><span>Assigned Judges</span>
                 </div>
                 <div className="progress-list">
                   {progressRows.map(({ competitor, entries, complete, stateLabel }) => {
@@ -2602,15 +2636,17 @@ export default function Page() {
                         <span className={`progress-status ${status}`}>
                           {complete ? "✓ Complete" : competitor.status === "active" ? "● Active · in progress" : stateLabel}
                         </span>
-                        {entries.length === 5 ? entries.map((entry) => (
-                          <span
-                            key={entry.slot}
-                            className={`judge-progress ${entry.status === "Finished" ? "finished" : entry.status === "In progress" ? "draft" : "not-started"}`}
-                            title={`Judge ${entry.slot} · ${entry.name} · ${entry.status}`}
-                          >
-                            <b>J{entry.slot} · {entry.name}</b><em>{entry.status}</em>
-                          </span>
-                        )) : <span className="assignment-warning">Assign five judges to this division</span>}
+                        <div className="judge-progress-list">
+                          {validProgressAssignments(entries) ? entries.map((entry) => (
+                            <span
+                              key={entry.user_id}
+                              className={`judge-progress ${entry.status === "Finished" ? "finished" : entry.status === "In progress" ? "draft" : "not-started"}`}
+                              title={`${entry.scoring_type === "technical" ? "Technical" : "Performance"} · ${entry.name} · ${entry.status}`}
+                            >
+                              <b>{entry.scoring_type === "technical" ? "Technical" : "Performance"} · {entry.name}</b><em>{entry.status}</em>
+                            </span>
+                          )) : <span className="assignment-warning">Assign 2–10 judges across both scoring groups</span>}
+                        </div>
                       </div>
                     );
                   })}
@@ -2671,11 +2707,31 @@ export default function Page() {
                             {c.dq && <span className="pill danger">DQ</span>}
                           </td>
                           <td>{c.division}</td>
-                          <td>{c.archived ? "Archived" : c.status}</td>
+                          <td>{c.archived ? "Legacy inactive" : c.status}</td>
                           <td>
                             <div className="row-actions">
                               <button onClick={() => setCompetitorEdit(c)}>
                                 <Pencil size={13} /> Edit
+                              </button>
+                              <button
+                                className="danger-button"
+                                title="Delete competitor and saved scoring data"
+                                onClick={() => setModal({
+                                  title: `Delete ${c.name}?`,
+                                  body: (() => {
+                                    const submissionCount = state.submissions.filter((submission) => submission.competitor_id === c.id).length;
+                                    const submissionImpact = submissionCount
+                                      ? ` This will also permanently delete ${submissionCount} saved judge submission${submissionCount === 1 ? "" : "s"} and their scores.`
+                                      : " This competitor has no saved judge submissions.";
+                                    const activeImpact = c.status === "active" ? " The active routine will end." : "";
+                                    return `This permanently deletes ${c.name} from the roster.${submissionImpact}${activeImpact} Any unsynced offline work for this competitor will not sync afterward. Existing audit history is retained. This cannot be undone.`;
+                                  })(),
+                                  action: () => void manage("delete", { id: c.id }),
+                                  confirmLabel: "Delete Competitor",
+                                  danger: true,
+                                })}
+                              >
+                                <Trash2 size={13} /> Delete
                               </button>
                               <button
                                 disabled={
@@ -2804,53 +2860,6 @@ export default function Page() {
                   </div>
                 ))}
             </section>
-            <section className="panel records admin-tab-password-panel">
-              <div className="panel-heading">
-                <h3>
-                  <Shield size={17} /> Shared Admin Tab Password
-                </h3>
-                <span className="pill">Administrators only</span>
-              </div>
-              <p>
-                Change the shared password everyone must enter to open the
-                Admin tab, including administrators.
-              </p>
-              <form
-                className="admin-tab-password-form"
-                onSubmit={changeAdminTabPassword}
-              >
-                <label>
-                  New shared password
-                  <PasswordField
-                    autoComplete="new-password"
-                    minLength={6}
-                    maxLength={256}
-                    required
-                    value={newAdminTabPassword}
-                    onChange={(e) => setNewAdminTabPassword(e.target.value)}
-                  />
-                </label>
-                <label>
-                  Confirm new password
-                  <PasswordField
-                    autoComplete="new-password"
-                    minLength={6}
-                    maxLength={256}
-                    required
-                    value={confirmAdminTabPassword}
-                    onChange={(e) => setConfirmAdminTabPassword(e.target.value)}
-                  />
-                </label>
-                {adminTabPasswordMessage && (
-                  <p className="admin-tab-password-message muted" role="status">
-                    {adminTabPasswordMessage}
-                  </p>
-                )}
-                <button className="primary">
-                  Update Shared Password <ArrowRight size={16} />
-                </button>
-              </form>
-            </section>
             <section className="panel records">
               <div className="panel-heading">
                 <h3>
@@ -2895,11 +2904,8 @@ export default function Page() {
                     Competitor: r.competitor.name,
                     Division: r.competitor.division,
                     Order: r.competitor.position,
-                    J1: r.technical[0],
-                    J2: r.technical[1],
-                    J3: r.technical[2],
-                    J4: r.performance[0],
-                    J5: r.performance[1],
+                    ...Object.fromEntries(r.technical.map((value, index) => [`Technical J${index + 1}`, value])),
+                    ...Object.fromEntries(r.performance.map((value, index) => [`Performance J${index + 1}`, value])),
                     Raw: r.raw,
                     Scaled: r.scaled,
                     Performance: r.average,
@@ -2918,7 +2924,12 @@ export default function Page() {
               )}
               {allDivisions
                 .filter((d) => d !== "Exhibition")
-                .map((d) => (
+                .map((d) => {
+                  const divisionJudges = (state.assignments ?? []).filter((assignment) => assignment.division === d);
+                  const technicalJudgeCount = divisionJudges.filter((assignment) => assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "technical").length;
+                  const performanceJudgeCount = divisionJudges.length - technicalJudgeCount;
+                  const scoreColumnCount = technicalJudgeCount + performanceJudgeCount + 4;
+                  return (
                   <div key={d}>
                     <h3 className="division-title">{d}</h3>
                     <div className="table-scroll">
@@ -2928,11 +2939,8 @@ export default function Page() {
                             {[
                               "Rank",
                               "Competitor",
-                              "J1",
-                              "J2",
-                              "J3",
-                              "J4",
-                              "J5",
+                              ...Array.from({ length: technicalJudgeCount }, (_, index) => `Technical J${index + 1}`),
+                              ...Array.from({ length: performanceJudgeCount }, (_, index) => `Performance J${index + 1}`),
                               "Raw tech",
                               "Scaled /70",
                               "Avg /30",
@@ -2977,7 +2985,7 @@ export default function Page() {
                                   <tr key={competitor.id}>
                                     <td>***</td>
                                     <td>{competitor.name}</td>
-                                    {Array.from({ length: 9 }, (_, index) => <td key={index}>***</td>)}
+                                    {Array.from({ length: scoreColumnCount }, (_, index) => <td key={index}>***</td>)}
                                     <td>—</td>
                                   </tr>
                                 ))}
@@ -2985,7 +2993,25 @@ export default function Page() {
                       </table>
                     </div>
                   </div>
-                ))}
+                );})}
+            </section>
+            <section className="panel records admin-tab-password-panel">
+              <div className="panel-heading">
+                <h3><Shield size={17} /> Shared Admin Tab Password</h3>
+                <span className="pill">Administrators only</span>
+              </div>
+              <form className="admin-tab-password-form" onSubmit={changeAdminTabPassword}>
+                <label>
+                  New shared password
+                  <PasswordField autoComplete="new-password" minLength={6} maxLength={256} required value={newAdminTabPassword} onChange={(e) => setNewAdminTabPassword(e.target.value)} />
+                </label>
+                <label>
+                  Confirm new password
+                  <PasswordField autoComplete="new-password" minLength={6} maxLength={256} required value={confirmAdminTabPassword} onChange={(e) => setConfirmAdminTabPassword(e.target.value)} />
+                </label>
+                {adminTabPasswordMessage && <p className="admin-tab-password-message muted" role="status">{adminTabPasswordMessage}</p>}
+                <button className="primary">Update Shared Password <ArrowRight size={16} /></button>
+              </form>
             </section>
           </div>
         )}
@@ -3120,17 +3146,17 @@ export default function Page() {
       )}
       {modal && (
         <Dialog title={modal.title} close={() => setModal(null)}>
-          <p>{modal.body}</p>
+          <p className={modal.danger ? "danger-warning" : undefined} role={modal.danger ? "alert" : undefined}>{modal.body}</p>
           <div className="dialog-actions">
             <button onClick={() => setModal(null)}>Cancel</button>
             <button
-              className="primary"
+              className={modal.danger ? "danger-button" : "primary"}
               onClick={() => {
                 modal.action();
                 setModal(null);
               }}
             >
-              Confirm
+              {modal.confirmLabel ?? "Confirm"}
             </button>
           </div>
         </Dialog>
@@ -3143,10 +3169,10 @@ export default function Page() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              if (competitorEdit.archived || competitorEdit.dq) {
+              if (competitorEdit.dq) {
                 setModal({
-                  title: "Confirm Competitor Status Change?",
-                  body: "Archiving or disqualifying this competitor changes access and results. Scores and audit history are preserved.",
+                  title: "Confirm Disqualification?",
+                  body: "Disqualifying this competitor changes access and results. Scores and audit history are preserved.",
                   action: () => void manage("save", competitorEdit),
                 });
               } else void manage("save", competitorEdit);
@@ -3223,20 +3249,6 @@ export default function Page() {
                 }
               />{" "}
               Disqualified
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={competitorEdit.archived}
-                onChange={(e) =>
-                  setCompetitorEdit({
-                    ...competitorEdit,
-                    archived: e.target.checked,
-                    status: e.target.checked ? "locked" : competitorEdit.status,
-                  })
-                }
-              />{" "}
-              Archive competitor (preserves scores)
             </label>
             <div className="dialog-actions">
               <button type="button" onClick={() => setCompetitorEdit(null)}>

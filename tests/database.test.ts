@@ -307,6 +307,15 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
       /Organizer required/,
     );
   }
+  await db.exec(
+    readFileSync("supabase/migrations/20260928200849_variable_judge_groups.sql", "utf8"),
+  );
+  await db.exec(
+    readFileSync("supabase/migrations/20260928195640_allow_competitor_deletion.sql", "utf8"),
+  );
+  await db.exec(
+    readFileSync("supabase/migrations/20260928200909_restore_unrestricted_competitor_deletion.sql", "utf8"),
+  );
   const alternateJ1 = crypto.randomUUID();
   await db.query("insert into auth.users values($1)", [alternateJ1]);
   await db.query(
@@ -322,11 +331,11 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   const judge4 = judgeIds.find((judge) => judge.slot === 4)!.id;
   const judge5 = judgeIds.find((judge) => judge.slot === 5)!.id;
   const teamGroup = [
-    { slot: 1, user_id: alternateJ1 },
-    { slot: 2, user_id: other },
-    { slot: 3, user_id: judge3 },
-    { slot: 4, user_id: judge4 },
-    { slot: 5, user_id: judge5 },
+    { slot: 1, user_id: alternateJ1, scoring_type: "technical" },
+    { slot: 2, user_id: other, scoring_type: "technical" },
+    { slot: 3, user_id: judge3, scoring_type: "technical" },
+    { slot: 4, user_id: judge4, scoring_type: "performance" },
+    { slot: 5, user_id: judge5, scoring_type: "performance" },
   ];
   await db.query("select manage_judge_assignments($1,$2,$3)", [
     admin,
@@ -372,6 +381,96 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     ]),
     /Only the active competitor can be started/,
   );
+  const extraTechnicalJudges: string[] = [];
+  for (let index = 6; index <= 9; index++) {
+    const id = crypto.randomUUID();
+    extraTechnicalJudges.push(id);
+    await db.query("insert into auth.users values($1)", [id]);
+    await db.query(
+      "insert into profiles(id,name,username,role,slot) values($1,$2,$3,'judge',1)",
+      [id, `Extra Judge ${index}`, `extrajudge${index}`],
+    );
+  }
+  const tenJudgeGroup = [
+    ...[user, other, judge3, alternateJ1, ...extraTechnicalJudges].map((user_id, index) => ({ slot: index + 1, user_id, scoring_type: "technical" })),
+    ...[judge4, judge5].map((user_id, index) => ({ slot: index + 9, user_id, scoring_type: "performance" })),
+  ];
+  await db.query("select manage_judge_assignments($1,$2,$3)", [
+    admin,
+    "Individual Juniors",
+    JSON.stringify(tenJudgeGroup),
+  ]);
+  await assert.rejects(
+    db.query("select manage_judge_assignments($1,$2,$3)", [
+      admin,
+      "Individual Newcomer",
+      JSON.stringify([
+        { slot: 1, user_id: user, scoring_type: "technical" },
+        { slot: 2, user_id: other, scoring_type: "technical" },
+      ]),
+    ]),
+    /at least one Technical judge and one Performance judge/,
+  );
+  await db.query("select manage_judge_assignments($1,$2,$3)", [
+    admin,
+    "Individual Newcomer",
+    JSON.stringify([
+      { slot: 1, user_id: user, scoring_type: "technical" },
+      { slot: 2, user_id: judge4, scoring_type: "performance" },
+    ]),
+  ]);
+  await db.query("update competitors set division='Individual Juniors' where id=$1", [nextTeamCompetitor]);
+  await db.query("select manage_competitor($1,'lock',$2,false)", [
+    admin,
+    JSON.stringify({ id: teamCompetitor }),
+  ]);
+  await db.query("select manage_competitor($1,'activate',$2,false)", [
+    admin,
+    JSON.stringify({ id: nextTeamCompetitor }),
+  ]);
+  const variableReservations = await db.query<{ count: number; technical: number; performance: number }>(
+    "select count(*)::int as count,count(*) filter (where scoring_type='technical')::int as technical,count(*) filter (where scoring_type='performance')::int as performance from submissions where competitor_id=$1",
+    [nextTeamCompetitor],
+  );
+  assert.deepEqual(variableReservations.rows[0], { count: 10, technical: 8, performance: 2 });
+  await assert.rejects(
+    db.query("select apply_score($1,4,$2,$3,0,'put_event',$4)", [
+      judge4,
+      crypto.randomUUID(),
+      nextTeamCompetitor,
+      JSON.stringify({ id: crypto.randomUUID(), trick: "T 1D", level: 1, features: [], at: new Date().toISOString() }),
+    ]),
+    /Technical judge required/,
+  );
+  await db.query("select apply_score($1,4,$2,$3,0,'finish',$4)", [
+    judge4,
+    crypto.randomUUID(),
+    nextTeamCompetitor,
+    scorePayload,
+  ]);
+  const unscoredCompetitor = crypto.randomUUID();
+  await db.query("insert into competitors(id,name,division,position,dq) values($1,'Delete me','Individual Juniors',4,true)", [unscoredCompetitor]);
+  await assert.rejects(
+    db.query("select delete_competitor($1,$2)", [other, unscoredCompetitor]),
+    /Organizer required/,
+  );
+  assert.equal((await db.query("select id from competitors where id=$1", [unscoredCompetitor])).rows.length, 1);
+  await db.query("select delete_competitor($1,$2)", [admin, unscoredCompetitor]);
+  const deletedSubmissions = await db.query<{ count: number }>(
+    "select count(*)::int as count from submissions where competitor_id=$1",
+    [nextTeamCompetitor],
+  );
+  assert.equal(deletedSubmissions.rows[0].count, 10);
+  await db.query("select delete_competitor($1,$2)", [admin, nextTeamCompetitor]);
+  assert.equal((await db.query("select id from competitors where id=$1", [nextTeamCompetitor])).rows.length, 0);
+  assert.equal((await db.query("select id from submissions where competitor_id=$1", [nextTeamCompetitor])).rows.length, 0);
+  const deletionAudit = await db.query<{ prior: Record<string, unknown> }>(
+    "select prior from audit where competitor_id=$1 and action='competitor_delete' order by id desc limit 1",
+    [nextTeamCompetitor],
+  );
+  assert.equal(deletionAudit.rows[0].prior.deleted_submission_count, 10);
+  assert.ok((await db.query("select id from audit where competitor_id=$1 and action='finish'", [nextTeamCompetitor])).rows.length > 0);
+  assert.equal((await db.query("select id from competitors where id=$1", [unscoredCompetitor])).rows.length, 0);
   await db.exec("set role authenticated");
   await assert.rejects(
     db.query("select manage_competitor($1,'lock',$2,true)", [

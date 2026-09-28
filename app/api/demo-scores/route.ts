@@ -19,7 +19,7 @@ export async function POST(req: Request) {
           events: s.events.map((e) => ({ ...e, value: eventScore(e, DEFAULT_SCORING_RULES) })),
         })),
         ...(fullAccess
-          ? { rankings: rankGlobal(snapshot.competitors, submissions, DEFAULT_SCORING_RULES) }
+          ? { rankings: rankGlobal(snapshot.competitors, submissions, DEFAULT_SCORING_RULES, snapshot.assignments) }
           : {}),
       },
       { headers: { "Cache-Control": "no-store" } },

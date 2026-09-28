@@ -2,6 +2,7 @@ import { identity, failure } from "@/lib/server";
 import { eventScore, rankGlobal, total } from "@/lib/scoring";
 import { Submission } from "@/lib/model";
 import { canManage } from "@/lib/access";
+import { canViewOwnPerformancePoints } from "@/lib/scoped";
 import { sanitizeAuditRows } from "@/lib/audit";
 import { requestHasAdminUnlock } from "@/lib/admin-unlock";
 import { loadScoringConfiguration } from "@/lib/scoring-config";
@@ -24,11 +25,15 @@ export async function GET(req: Request) {
     const databaseSubmissions = (subs ?? []) as Submission[];
     const submissions = revealPoints
       ? databaseSubmissions
-      : databaseSubmissions.map((submission) => ({
-          ...submission,
-          performance: [],
-          events: submission.events.map(({ value: _value, ...event }) => event),
-        }));
+      : databaseSubmissions.map((submission) => {
+          const maySeeOwnPerformance = canViewOwnPerformancePoints(profile, submission);
+          return {
+            ...submission,
+            performance: maySeeOwnPerformance ? submission.performance : [],
+            events: submission.events.map(({ value: _value, ...event }) => event),
+            ...(maySeeOwnPerformance ? { total: total(submission, scoringConfiguration.rules) } : { total: undefined }),
+          };
+        });
     const own = submissions.filter(
       (s) =>
         s.user_id === profile.id &&
@@ -38,7 +43,7 @@ export async function GET(req: Request) {
     const personal = own.map((s) => ({
       competitor_id: s.competitor_id,
       rank: 1,
-      ...(revealPoints && s.slot > 3 ? { total: total(s, scoringConfiguration.rules) } : {}),
+      ...(revealPoints || canViewOwnPerformancePoints(profile, s) ? { total: total(s, scoringConfiguration.rules) } : {}),
     }));
     for (const division of new Set(allCompetitors!.map((c) => c.division))) {
       const sorted = own
@@ -54,15 +59,20 @@ export async function GET(req: Request) {
     }
     const divisionRows = await client.from("divisions").select("name");
     const ownProfile = await withAvatar(client, profile);
-    let assignmentsQuery = client.from("division_judges").select("division,slot,user_id");
+    let assignmentsQuery = client.from("division_judges").select("division,slot,user_id,scoring_type");
     if (!fullAccess) assignmentsQuery = assignmentsQuery.eq("user_id", profile.id);
     let assignmentRows = await assignmentsQuery;
+    if (["42703", "PGRST204"].includes(assignmentRows.error?.code ?? "")) {
+      assignmentsQuery = client.from("division_judges").select("division,slot,user_id");
+      if (!fullAccess) assignmentsQuery = assignmentsQuery.eq("user_id", profile.id);
+      assignmentRows = await assignmentsQuery;
+    }
     const assignmentsMissing = ["42P01", "PGRST205"].includes(assignmentRows.error?.code ?? "");
     // Compatibility while an existing deployment is waiting for migration 006.
     if (assignmentsMissing) {
       assignmentRows = {
         data: [...new Set(allCompetitors!.map((c: any) => c.division))].map((division) =>
-          ({ division, slot: profile.slot, user_id: profile.id })),
+          ({ division, slot: profile.slot, user_id: profile.id, scoring_type: profile.slot! <= 3 ? "technical" : "performance" })),
         error: null,
       } as any;
       if (fullAccess) assignmentRows.data = [];
@@ -86,8 +96,7 @@ export async function GET(req: Request) {
       personal,
       submissions: submissions.map((s) => {
         if (!revealPoints) {
-          const { total: _total, ...withoutTotal } = s;
-          return withoutTotal;
+          return s;
         }
         return {
           ...s,
@@ -122,7 +131,7 @@ export async function GET(req: Request) {
     }
     if (fullAccess) {
       if (revealPoints)
-        result.rankings = rankGlobal(allCompetitors!, submissions, scoringConfiguration.rules);
+        result.rankings = rankGlobal(allCompetitors!, submissions, scoringConfiguration.rules, assignments);
       result.competitors = allCompetitors;
       let roster: any = await client
         .from("profiles")
@@ -142,7 +151,7 @@ export async function GET(req: Request) {
       if (assignmentsMissing) {
         const judges = (profiles ?? []).filter((p: any) => p.role === "judge" && p.active);
         result.assignments = (divisionRows.data ?? []).flatMap((d: any) =>
-          judges.map((p: any) => ({ division: d.name, slot: p.slot, user_id: p.id })),
+          judges.map((p: any) => ({ division: d.name, slot: p.slot, user_id: p.id, scoring_type: p.slot <= 3 ? "technical" : "performance" })),
         );
       }
     }

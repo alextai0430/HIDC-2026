@@ -65,6 +65,43 @@ test("division normalization, complete scores, missing scores, and DQ", () => {
   assert.equal(results.find((r) => r.competitor.id === "4")!.final, 0);
   assert.equal(results.length, 4);
 });
+test("variable judge groups average within Technical and Performance before 70/30 ranking", () => {
+  const competitors = [competitor("1"), competitor("2")];
+  const assignments = [
+    { division: "Individual Open", slot: 1, user_id: "tech-a", scoring_type: "technical" as const },
+    { division: "Individual Open", slot: 2, user_id: "tech-b", scoring_type: "technical" as const },
+    { division: "Individual Open", slot: 3, user_id: "perf-a", scoring_type: "performance" as const },
+  ];
+  const rows = [
+    { competitor_id: "1", user_id: "tech-a", slot: 1, scoring_type: "technical" as const, level: 1 },
+    { competitor_id: "1", user_id: "tech-b", slot: 1, scoring_type: "technical" as const, level: 2 },
+    { competitor_id: "1", user_id: "perf-a", slot: 4, scoring_type: "performance" as const, level: 1 },
+    { competitor_id: "2", user_id: "tech-a", slot: 1, scoring_type: "technical" as const, level: 3 },
+    { competitor_id: "2", user_id: "tech-b", slot: 1, scoring_type: "technical" as const, level: 4 },
+    { competitor_id: "2", user_id: "perf-a", slot: 4, scoring_type: "performance" as const, level: 2 },
+  ].map((row) => {
+    const saved = submission(row.competitor_id, row.slot);
+    saved.user_id = row.user_id;
+    saved.scoring_type = row.scoring_type;
+    saved.events = row.scoring_type === "technical" ? [event("T 3D", row.level)] : [];
+    saved.performance = row.scoring_type === "performance" ? Array(6).fill(row.level === 1 ? 3 : 2) : [];
+    return saved;
+  });
+  const results = rankGlobal(competitors, rows, DEFAULT_SCORING_RULES, assignments);
+  const first = results.find((result) => result.competitor.id === "1")!;
+  const second = results.find((result) => result.competitor.id === "2")!;
+  assert.equal(first.complete, true);
+  assert.equal(first.technical.length, 2);
+  assert.equal(first.performance.length, 1);
+  assert.equal(first.raw, 9);
+  assert.equal(first.average, 18);
+  assert.equal(first.final, 48);
+  assert.equal(second.raw, 21);
+  assert.equal(second.average, 12);
+  assert.equal(second.final, 82);
+  rows.find((row) => row.competitor_id === "1" && row.user_id === "perf-a")!.finished = false;
+  assert.equal(rankGlobal(competitors, rows, DEFAULT_SCORING_RULES, assignments).find((result) => result.competitor.id === "1")!.complete, false);
+});
 test("zero and negative raw values cannot create NaN or negative final scores", () => {
   const subs = [1, 2, 3, 4, 5].map((s) => submission("1", s));
   subs.forEach((s) => (s.events = [event("Time Violation")]));

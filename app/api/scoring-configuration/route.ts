@@ -6,6 +6,7 @@ import {
   calculateScoringConfigurationImpact,
   loadScoringConfiguration,
   scoringRulesSchema,
+  validateScoringRules,
 } from "@/lib/scoring-config";
 import type { Competitor, Profile, Submission } from "@/lib/model";
 
@@ -26,8 +27,26 @@ export async function GET(req: Request) {
     if (denied) return denied;
     const config = await loadScoringConfiguration(client);
     if (!config.storageReady) return migrationRequired();
+    const { data: revisions, error: historyError } = await client
+      .from("audit")
+      .select("created_at,prior")
+      .eq("action", "scoring_configuration_update")
+      .order("id", { ascending: false })
+      .limit(25);
+    if (historyError) throw new Error(historyError.message);
+    const previousRevisions = (revisions ?? []).flatMap((row: any) => {
+      const revision = Number(row.prior?.revision);
+      if (!Number.isInteger(revision) || revision < 1 || revision >= config.revision || !row.prior?.rules) return [];
+      try {
+        return [{ revision, updatedAt: row.created_at ?? null, rules: validateScoringRules(row.prior.rules) }];
+      } catch {
+        return [];
+      }
+    }).filter((entry: { revision: number }, index: number, all: { revision: number }[]) =>
+      all.findIndex((candidate) => candidate.revision === entry.revision) === index,
+    );
     return Response.json(
-      { revision: config.revision, dataRevision: config.dataRevision, rules: config.rules },
+      { revision: config.revision, dataRevision: config.dataRevision, rules: config.rules, previousRevisions },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
@@ -58,12 +77,13 @@ export async function POST(req: Request) {
           { status: 409, headers: { "Cache-Control": "no-store" } },
         );
       }
-      const { submissions, competitors } = await loadImpactData(client);
+      const { submissions, competitors, assignments } = await loadImpactData(client);
       const impact = calculateScoringConfigurationImpact(
         config.rules,
         input.rules,
         submissions,
         competitors,
+        assignments,
       );
       return Response.json(
         { revision: config.revision, dataRevision: config.dataRevision, impact, unchanged: sameJson(config.rules, input.rules) },
@@ -91,12 +111,13 @@ export async function POST(req: Request) {
         { status: 409, headers: { "Cache-Control": "no-store" } },
       );
     }
-    const { submissions, competitors } = await loadImpactData(client);
+    const { submissions, competitors, assignments } = await loadImpactData(client);
     const currentImpact = calculateScoringConfigurationImpact(
       config.rules,
       input.rules,
       submissions,
       competitors,
+      assignments,
     );
     if (!sameJson(input.impact, currentImpact)) {
       return Response.json(
@@ -163,16 +184,27 @@ function migrationRequired() {
   );
 }
 
-async function loadImpactData(client: any): Promise<{ submissions: Submission[]; competitors: Competitor[] }> {
-  const [scoreQuery, competitorQuery] = await Promise.all([
-    client.from("submissions").select("id,competitor_id,slot,events,finished,dq,performance,version,updated_at").lte("slot", 3),
+async function loadImpactData(client: any): Promise<{
+  submissions: Submission[];
+  competitors: Competitor[];
+  assignments: { division: string; slot: number; user_id: string; scoring_type?: "technical" | "performance" }[];
+}> {
+  let [scoreQuery, competitorQuery, assignmentQuery] = await Promise.all([
+    client.from("submissions").select("id,competitor_id,user_id,slot,scoring_type,events,finished,dq,performance,version,updated_at"),
     client.from("competitors").select("id,name,division,position,status,dq,archived").order("position"),
+    client.from("division_judges").select("division,slot,user_id,scoring_type"),
   ]);
+  if (["42703", "PGRST204"].includes(scoreQuery.error?.code ?? ""))
+    scoreQuery = await client.from("submissions").select("id,competitor_id,user_id,slot,events,finished,dq,performance,version,updated_at");
+  if (["42703", "PGRST204"].includes(assignmentQuery.error?.code ?? ""))
+    assignmentQuery = await client.from("division_judges").select("division,slot,user_id");
   if (scoreQuery.error) throw new Error(scoreQuery.error.message);
   if (competitorQuery.error) throw new Error(competitorQuery.error.message);
+  if (assignmentQuery.error) throw new Error(assignmentQuery.error.message);
   return {
     submissions: (scoreQuery.data ?? []) as Submission[],
     competitors: (competitorQuery.data ?? []) as Competitor[],
+    assignments: assignmentQuery.data ?? [],
   };
 }
 
