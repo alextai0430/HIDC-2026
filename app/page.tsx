@@ -54,7 +54,7 @@ import {
 import { download } from "@/lib/export";
 import TechnicalPointConfiguration from "@/app/components/technical-point-configuration";
 import AppearanceSettings, { type AppearanceSaveResult } from "@/app/components/appearance-settings";
-import { applyAppearance, AppearancePreferences, defaultAppearance, isAppearancePreferences } from "@/lib/appearance";
+import { applyAppearance, AppearancePreferences, defaultAppearance, normalizeAppearancePreferences } from "@/lib/appearance";
 import {
   detailExportRows,
   detailSubmissions,
@@ -179,6 +179,7 @@ export default function Page() {
   const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
   const [themePreference, setThemePreference] = useState<"system" | "light" | "dark">("light");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<"account" | "appearance" | "hotkeys" | "privacy" | "session" | null>("account");
   const [profileName, setProfileName] = useState("");
   const [profileUsername, setProfileUsername] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
@@ -197,7 +198,6 @@ export default function Page() {
     [editing, setEditing] = useState<Event | null>(null),
     [hotkeys, setHotkeys] = useState(defaultKeys),
     [keysEnabled, setKeysEnabled] = useState(true),
-    [keysOpen, setKeysOpen] = useState(false),
     [modal, setModal] = useState<{
       title: string;
       body: string;
@@ -614,9 +614,7 @@ export default function Page() {
   }, [commit]);
   useEffect(() => {
     if (!profile) return;
-    const preferences = isAppearancePreferences(profile.appearance_preferences)
-      ? profile.appearance_preferences
-      : defaultAppearance;
+    const preferences = normalizeAppearancePreferences(profile.appearance_preferences);
     setAppearance(preferences);
     setThemePreference(preferences.mode);
     const effective = preferences.mode === "system"
@@ -630,6 +628,7 @@ export default function Page() {
     profile?.appearance_preferences?.scheme,
     profile?.appearance_preferences?.font,
     profile?.appearance_preferences?.mode,
+    profile?.appearance_preferences?.sidebarCollapsed,
   ]);
   useEffect(() => {
     if (online && workspace?.appearancePending) void syncAppearance();
@@ -779,7 +778,7 @@ export default function Page() {
     const listener = (e: KeyboardEvent) => {
       if (
         !keysEnabled ||
-        keysOpen ||
+        settingsOpen ||
         modal ||
         competitorEdit ||
         userEdit ||
@@ -848,6 +847,7 @@ export default function Page() {
     }
   }
   function openProfileSettings() {
+    setSettingsSection("account");
     setProfileName(profile?.name ?? "");
     setProfileUsername(profile?.username ?? "");
     setCurrentPassword("");
@@ -856,6 +856,17 @@ export default function Page() {
     setProfileMessage("");
     setProfileMessageError(false);
     setAppearanceSyncError("");
+    setSettingsOpen(true);
+  }
+  function openSettingsSection(section: "account" | "appearance" | "hotkeys" | "privacy" | "session") {
+    setSettingsSection(section);
+    setProfileName(profile?.name ?? "");
+    setProfileUsername(profile?.username ?? "");
+    setCurrentPassword("");
+    setNewLoginPassword("");
+    setConfirmLoginPassword("");
+    setProfileMessage("");
+    setProfileMessageError(false);
     setSettingsOpen(true);
   }
   async function saveAppearancePreferences(preferences: AppearancePreferences): Promise<AppearanceSaveResult> {
@@ -1304,7 +1315,7 @@ export default function Page() {
     "Admin",
   ];
   return (
-    <div className="app-shell" data-template={appearance.template}>
+    <div className="app-shell" data-template={appearance.template} data-sidebar-collapsed={String(appearance.sidebarCollapsed)}>
       <header>
         <button
           className="brand"
@@ -1332,6 +1343,25 @@ export default function Page() {
           </span>
         </button>
         <div className="header-right">
+          {appearance.template === "sidebar-workspace" ? (
+            <button
+              type="button"
+              className="sidebar-toggle"
+              aria-label={appearance.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              title={appearance.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-pressed={appearance.sidebarCollapsed}
+              onClick={() => {
+                const next = { ...appearance, sidebarCollapsed: !appearance.sidebarCollapsed };
+                previewAppearance(next);
+                void saveAppearancePreferences(next).catch((error) => {
+                  setSyncError(`Appearance could not be saved: ${(error as Error).message}`);
+                });
+              }}
+            >
+              <PanelLeft size={17} aria-hidden="true" />
+              <span>{appearance.sidebarCollapsed ? "Show Navigation" : "Hide Navigation"}</span>
+            </button>
+          ) : null}
           <span className={`connection ${!online ? "offline" : ""}`}>
             {online ? <Cloud size={16} /> : <CloudOff size={16} />}{" "}
             {demo
@@ -1509,7 +1539,7 @@ export default function Page() {
                   <Radio size={14} /> LIVE SESSION
                 </span>
                 {tab === "Technical" && (
-                  <button onClick={() => setKeysOpen(true)}>
+                  <button onClick={() => openSettingsSection("hotkeys")}>
                     <Keyboard size={16} /> Hotkeys <kbd>?</kbd>
                   </button>
                 )}
@@ -2972,112 +3002,114 @@ export default function Page() {
       </footer>
       {settingsOpen && profile && (
         <Dialog title="Profile & Settings" close={() => setSettingsOpen(false)}>
-          <div className="profile-avatar-control">
-            <span className="avatar profile-avatar-large">
-              {profile.avatar_url ? (
-                <img src={profile.avatar_url} alt={`${profile.name} profile`} />
-              ) : (
-                profile.name.trim().split(/\s+/).slice(0, 2).map((n) => n[0]?.toUpperCase()).join("")
-              )}
-            </span>
-            <div>
-              <b>Profile picture</b>
-              <p>JPEG, PNG, or WebP · up to 2 MB</p>
-            </div>
-            <label className="button-like">
-              <Camera size={15} /> Replace
-              <input
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                disabled={profileBusy || !online || demo}
-                onChange={(e) => {
-                  const file = e.currentTarget.files?.[0];
-                  e.currentTarget.value = "";
-                  if (file) void changeAvatar(file);
-                }}
-              />
-            </label>
-            {profile.avatar_url && (
-              <button type="button" disabled={profileBusy || !online || demo} onClick={() => void removeAvatar()}>
-                <Trash2 size={15} /> Remove
+          <div className="settings-accordion">
+            <section className={`settings-section ${settingsSection === "account" ? "expanded" : ""}`}>
+              <button type="button" className="settings-section-trigger" aria-expanded={settingsSection === "account"} aria-controls="settings-account" onClick={() => setSettingsSection((current) => current === "account" ? null : "account")}>
+                <span>Account</span><ChevronRight size={16} aria-hidden="true" />
               </button>
-            )}
-          </div>
-          {demo && <p className="info-note">Demo mode: account changes and profile pictures are not saved to a live account.</p>}
-          <form className="profile-settings-form" onSubmit={saveProfileSettings}>
-            <label>
-              Display name
-              <input required maxLength={100} value={profileName} onChange={(e) => setProfileName(e.target.value)} />
-            </label>
-            <label>
-              Username
-              <input
-                required minLength={3} maxLength={32}
-                pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}"
-                autoComplete="username"
-                value={profileUsername}
-                onChange={(e) => setProfileUsername(e.target.value)}
-              />
-            </label>
-            <p className="profile-help">Your username is used to sign in. It must be unique.</p>
-            <label>
-              Current password <span className="muted">(required for username or password changes)</span>
-              <PasswordField autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
-            </label>
-            <label>
-              New password <span className="muted">(optional · minimum 6 characters)</span>
-              <PasswordField minLength={6} maxLength={256} autoComplete="new-password" value={newLoginPassword} onChange={(e) => setNewLoginPassword(e.target.value)} />
-            </label>
-            <label>
-              Confirm new password
-              <PasswordField minLength={6} maxLength={256} autoComplete="new-password" value={confirmLoginPassword} onChange={(e) => setConfirmLoginPassword(e.target.value)} />
-            </label>
-            <p className="password-privacy-notice">Use a password only for this scoring system. Event organizers can reset account access; do not reuse a personal password.</p>
-            <div className="profile-settings-actions">
-              <button className="primary" disabled={profileBusy || (!online && !demo)}>
-                {profileBusy ? "Saving…" : "Save Profile"}
+              <div className="settings-section-content" id="settings-account" hidden={settingsSection !== "account"}>
+                <div className="profile-avatar-control">
+                  <span className="avatar profile-avatar-large">
+                    {profile.avatar_url ? <img src={profile.avatar_url} alt={`${profile.name} profile`} /> : profile.name.trim().split(/\s+/).slice(0, 2).map((n) => n[0]?.toUpperCase()).join("")}
+                  </span>
+                  <div><b>Profile picture</b><p>JPEG, PNG, or WebP · up to 2 MB</p></div>
+                  <label className="button-like">
+                    <Camera size={15} /> Replace
+                    <input type="file" accept="image/jpeg,image/png,image/webp" disabled={profileBusy || !online || demo} onChange={(e) => {
+                      const file = e.currentTarget.files?.[0];
+                      e.currentTarget.value = "";
+                      if (file) void changeAvatar(file);
+                    }} />
+                  </label>
+                  {profile.avatar_url && <button type="button" disabled={profileBusy || !online || demo} onClick={() => void removeAvatar()}><Trash2 size={15} /> Remove</button>}
+                </div>
+                {demo && <p className="info-note">Demo mode: account changes and profile pictures are not saved to a live account.</p>}
+                <form className="profile-settings-form" onSubmit={saveProfileSettings}>
+                  <label>Display name<input required maxLength={100} value={profileName} onChange={(e) => setProfileName(e.target.value)} /></label>
+                  <label>Username<input required minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9_-]{2,31}" autoComplete="username" value={profileUsername} onChange={(e) => setProfileUsername(e.target.value)} /></label>
+                  <p className="profile-help">Your username is used to sign in. It must be unique.</p>
+                  <label>Current password <span className="muted">(required for username or password changes)</span><PasswordField autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /></label>
+                  <label>New password <span className="muted">(optional · minimum 6 characters)</span><PasswordField minLength={6} maxLength={256} autoComplete="new-password" value={newLoginPassword} onChange={(e) => setNewLoginPassword(e.target.value)} /></label>
+                  <label>Confirm new password<PasswordField minLength={6} maxLength={256} autoComplete="new-password" value={confirmLoginPassword} onChange={(e) => setConfirmLoginPassword(e.target.value)} /></label>
+                  <p className="password-privacy-notice">Use a password only for this scoring system. Event organizers can reset account access; do not reuse a personal password.</p>
+                  <div className="profile-settings-actions"><button className="primary" disabled={profileBusy || (!online && !demo)}>{profileBusy ? "Saving…" : "Save Profile"}</button></div>
+                </form>
+              </div>
+            </section>
+
+            <section className={`settings-section ${settingsSection === "appearance" ? "expanded" : ""}`}>
+              <button type="button" className="settings-section-trigger" aria-expanded={settingsSection === "appearance"} aria-controls="settings-appearance" onClick={() => setSettingsSection((current) => current === "appearance" ? null : "appearance")}>
+                <span>Appearance</span><ChevronRight size={16} aria-hidden="true" />
               </button>
-            </div>
-          </form>
-          <div className="profile-local-settings">
-            <AppearanceSettings
-              initial={isAppearancePreferences(profile?.appearance_preferences)
-                ? profile.appearance_preferences
-                : defaultAppearance}
-              online={online && !demo}
-              demo={demo}
-              onPreview={previewAppearance}
-              onSave={saveAppearancePreferences}
-            />
-            {appearanceSyncError && <p className="error appearance-sync-error" role="status">{appearanceSyncError}</p>}
-            <div className="profile-setting-row">
-              <div><b>Hotkeys</b><span>Configure your local keyboard shortcuts.</span></div>
-              <button type="button" onClick={() => { setSettingsOpen(false); setKeysOpen(true); }}>Configure</button>
-            </div>
-            <div className="profile-setting-row">
-              <div><b>Offline cache</b><span>Clears only this account’s saved workspace on this browser.</span></div>
-              <button
-                type="button"
-                disabled={!!workspace?.queue.length}
-                onClick={() => {
-                  setSettingsOpen(false);
-                  setModal({
-                    title: "Clear Your Offline Cache?",
-                    body: workspace?.queue.length
-                      ? "Sync pending score changes first."
-                      : "This removes only your local workspace from this browser and signs you out. It does not delete online profiles or scoring records.",
-                    action: () => void clearOwnOfflineCache(),
-                  });
-                }}
-              >Clear Cache</button>
-            </div>
-            {workspace?.queue.length ? <p className="profile-help">Sync {workspace.queue.length} pending score change(s) before clearing your cache or signing out.</p> : null}
-          </div>
-          <div className="profile-dialog-footer">
-            <button type="button" onClick={() => void signOut()}><LogOut size={15} /> Sign Out</button>
+              <div className="settings-section-content" id="settings-appearance" hidden={settingsSection !== "appearance"}>
+                <AppearanceSettings initial={normalizeAppearancePreferences(profile.appearance_preferences)} online={online && !demo} demo={demo} onPreview={previewAppearance} onSave={saveAppearancePreferences} />
+                {appearanceSyncError && <p className="error appearance-sync-error" role="status">{appearanceSyncError}</p>}
+              </div>
+            </section>
+
+            <section className={`settings-section ${settingsSection === "hotkeys" ? "expanded" : ""}`}>
+              <button type="button" className="settings-section-trigger" aria-expanded={settingsSection === "hotkeys"} aria-controls="settings-hotkeys" onClick={() => setSettingsSection((current) => current === "hotkeys" ? null : "hotkeys")}>
+                <span>Hotkeys</span><ChevronRight size={16} aria-hidden="true" />
+              </button>
+              <div className="settings-section-content" id="settings-hotkeys" hidden={settingsSection !== "hotkeys"}>
+                <p className="settings-section-help">Shortcuts are pressed in sequence within 0.9 seconds and pause while typing in a field.</p>
+                <label className="checkbox"><input type="checkbox" checked={keysEnabled} onChange={(event) => {
+                  setKeysEnabled(event.target.checked);
+                  localStorage.setItem("hidc-keys-enabled", String(event.target.checked));
+                }} /> Enable keyboard shortcuts</label>
+                <div className="hotkey-list">
+                  {Object.entries(hotkeys).map(([action, key]) => <label key={action}>
+                    <span>{action.replace("level:", "Level ").replace("tab:", "Go to ")}</span>
+                    <input aria-label={`Hotkey for ${action}`} value={key} onChange={(event) => setHotkeys({ ...hotkeys, [action]: event.target.value })} />
+                  </label>)}
+                </div>
+                <div className="settings-section-actions">
+                  <button type="button" onClick={() => setHotkeys(defaultKeys)}>Reset Defaults</button>
+                  <button type="button" className="primary" onClick={() => {
+                    const values = Object.values(hotkeys).filter(Boolean);
+                    if (new Set(values).size !== values.length) {
+                      setSyncError("Hotkeys must be unique. Resolve duplicate bindings before saving.");
+                      return;
+                    }
+                    localStorage.setItem("hidc-hotkeys", JSON.stringify(hotkeys));
+                    setNotice("Hotkeys saved on this laptop.");
+                  }}>Save Hotkeys</button>
+                </div>
+              </div>
+            </section>
+
+            <section className={`settings-section ${settingsSection === "privacy" ? "expanded" : ""}`}>
+              <button type="button" className="settings-section-trigger" aria-expanded={settingsSection === "privacy"} aria-controls="settings-privacy" onClick={() => setSettingsSection((current) => current === "privacy" ? null : "privacy")}>
+                <span>Privacy / Local Data</span><ChevronRight size={16} aria-hidden="true" />
+              </button>
+              <div className="settings-section-content" id="settings-privacy" hidden={settingsSection !== "privacy"}>
+                <div className="profile-setting-row"><div><b>Offline cache</b><span>Clears only this account’s saved workspace on this browser.</span></div>
+                  <button type="button" disabled={!!workspace?.queue.length} onClick={() => {
+                    setSettingsOpen(false);
+                    setModal({
+                      title: "Clear Your Offline Cache?",
+                      body: workspace?.queue.length ? "Sync pending score changes first." : "This removes only your local workspace from this browser and signs you out. It does not delete online profiles or scoring records.",
+                      action: () => void clearOwnOfflineCache(),
+                    });
+                  }}>Clear Cache</button>
+                </div>
+                {workspace?.queue.length ? <p className="profile-help">Sync {workspace.queue.length} pending score change(s) before clearing your cache or signing out.</p> : null}
+                {!online && !demo && <p className="profile-help">Appearance and hotkey updates are saved locally while offline and sync when the server connection returns.</p>}
+              </div>
+            </section>
+
+            <section className={`settings-section ${settingsSection === "session" ? "expanded" : ""}`}>
+              <button type="button" className="settings-section-trigger" aria-expanded={settingsSection === "session"} aria-controls="settings-session" onClick={() => setSettingsSection((current) => current === "session" ? null : "session")}>
+                <span>Session</span><ChevronRight size={16} aria-hidden="true" />
+              </button>
+              <div className="settings-section-content settings-session-content" id="settings-session" hidden={settingsSection !== "session"}>
+                <span>Sign out of this judging account on this laptop.</span>
+                <button type="button" onClick={() => void signOut()}><LogOut size={15} /> Sign Out</button>
+              </div>
+            </section>
           </div>
           {profileMessage && <p className={profileMessageError ? "error" : "success"} role="status">{profileMessage}</p>}
-          {!online && !demo && <p className="profile-help">Profile, username, password, and picture changes require an online connection. Appearance and hotkeys remain available offline and sync when reconnected.</p>}
+          {!online && !demo && <p className="profile-help">Profile, username, password, and picture changes require an online connection.</p>}
         </Dialog>
       )}
       {notice && (
@@ -3099,66 +3131,6 @@ export default function Page() {
               }}
             >
               Confirm
-            </button>
-          </div>
-        </Dialog>
-      )}
-      {keysOpen && (
-        <Dialog title="Hotkeys" close={() => setKeysOpen(false)}>
-          <p>
-            Two-character shortcuts are pressed in sequence within 0.9 seconds.
-            Shortcuts pause while typing in a field. Each binding must be
-            unique.
-          </p>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={keysEnabled}
-              onChange={(e) => {
-                setKeysEnabled(e.target.checked);
-                localStorage.setItem(
-                  "hidc-keys-enabled",
-                  String(e.target.checked),
-                );
-              }}
-            />{" "}
-            Enable keyboard shortcuts
-          </label>
-          <div className="hotkey-list">
-            {Object.entries(hotkeys).map(([action, key]) => (
-              <label key={action}>
-                <span>
-                  {action.replace("level:", "Level ").replace("tab:", "Go to ")}
-                </span>
-                <input
-                  aria-label={`Hotkey for ${action}`}
-                  value={key}
-                  onChange={(e) =>
-                    setHotkeys({ ...hotkeys, [action]: e.target.value })
-                  }
-                />
-              </label>
-            ))}
-          </div>
-          <div className="dialog-actions">
-            <button onClick={() => setHotkeys(defaultKeys)}>
-              Reset Defaults
-            </button>
-            <button
-              className="primary"
-              onClick={() => {
-                const vals = Object.values(hotkeys).filter(Boolean);
-                if (new Set(vals).size !== vals.length) {
-                  setSyncError(
-                    "Hotkeys must be unique. Resolve duplicate bindings before saving.",
-                  );
-                  return;
-                }
-                localStorage.setItem("hidc-hotkeys", JSON.stringify(hotkeys));
-                setKeysOpen(false);
-              }}
-            >
-              Save hotkeys
             </button>
           </div>
         </Dialog>

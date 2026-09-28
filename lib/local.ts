@@ -1,6 +1,6 @@
 import { openDB } from "idb";
 import { Operation, Snapshot, Submission } from "./model";
-import type { AppearancePreferences } from "./appearance";
+import { normalizeAppearancePreferences, type AppearancePreferences } from "./appearance";
 const database = () =>
   openDB("hidc-2026", 1, {
     upgrade(db) {
@@ -34,6 +34,10 @@ export async function clearLocal(user: string) {
 export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
   const cached = structuredClone(value);
   const snapshot = cached.snapshot;
+  snapshot.profile.appearance_preferences = normalizeAppearancePreferences(snapshot.profile.appearance_preferences);
+  if (cached.appearancePending) {
+    cached.appearancePending.preferences = normalizeAppearancePreferences(cached.appearancePending.preferences);
+  }
   // Signed avatar URLs are short-lived bearer links and must not persist in IndexedDB.
   delete snapshot.profile.avatar_url;
   snapshot.protected = false;

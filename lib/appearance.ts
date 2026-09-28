@@ -28,6 +28,21 @@ export const appearanceSchemes = [
   { id: "monochrome", label: "Monochrome", hue: 220, saturation: 0, accent: "#4b5563", darkAccent: "#d5dbe3" },
   { id: "high-contrast-dark", label: "High Contrast Dark", hue: 220, saturation: 0, accent: "#005d52", darkAccent: "#77e8d3", contrast: true },
   { id: "high-contrast-light", label: "High Contrast Light", hue: 220, saturation: 0, accent: "#005d52", darkAccent: "#76f0db", contrast: true },
+  { id: "neon-arcade", label: "Neon Arcade", hue: 305, saturation: 78, accent: "#9800a8", darkAccent: "#ff64f0" },
+  { id: "cyberpunk", label: "Cyberpunk", hue: 326, saturation: 72, accent: "#a00046", darkAccent: "#ff579c" },
+  { id: "retro-terminal", label: "Retro Terminal", hue: 132, saturation: 66, accent: "#08742b", darkAccent: "#78ff9a" },
+  { id: "synthwave", label: "Synthwave", hue: 292, saturation: 69, accent: "#7133a6", darkAccent: "#d986ff" },
+  { id: "vaporwave", label: "Vaporwave", hue: 187, saturation: 68, accent: "#00798a", darkAccent: "#60f0ff" },
+  { id: "deep-space", label: "Deep Space", hue: 245, saturation: 54, accent: "#34359b", darkAccent: "#9597ff" },
+  { id: "aurora", label: "Aurora", hue: 160, saturation: 62, accent: "#067153", darkAccent: "#56ffc0" },
+  { id: "solar-flare", label: "Solar Flare", hue: 24, saturation: 72, accent: "#b13f0b", darkAccent: "#ff9b4d" },
+  { id: "cherry-blossom", label: "Cherry Blossom", hue: 337, saturation: 53, accent: "#a52f70", darkAccent: "#ff9dd0" },
+  { id: "tropical", label: "Tropical", hue: 168, saturation: 66, accent: "#007e78", darkAccent: "#54fff0" },
+  { id: "midnight-purple", label: "Midnight Purple", hue: 264, saturation: 59, accent: "#5b37a0", darkAccent: "#bd9aff" },
+  { id: "electric-lime", label: "Electric Lime", hue: 82, saturation: 68, accent: "#4b7100", darkAccent: "#d0ff62" },
+  { id: "candy-pop", label: "Candy Pop", hue: 326, saturation: 57, accent: "#aa286f", darkAccent: "#ff85c7" },
+  { id: "royal-gold", label: "Royal Gold", hue: 46, saturation: 62, accent: "#846000", darkAccent: "#f6d35f" },
+  { id: "paper-notebook", label: "Paper Notebook", hue: 44, saturation: 35, accent: "#725a2d", darkAccent: "#dec38f" },
 ] as const;
 
 type AppearanceFont = { id: string; label: string; css: string; google?: string };
@@ -42,6 +57,16 @@ export const appearanceFonts = [
   { id: "work-sans", label: "Work Sans", css: '"Work Sans", "Segoe UI", Arial, sans-serif', google: "Work+Sans:wght@400;500;600;700;800" },
   { id: "lato", label: "Lato", css: 'Lato, "Segoe UI", Arial, sans-serif', google: "Lato:wght@400;700;900" },
   { id: "system-ui", label: "System UI", css: 'system-ui, "Segoe UI", Arial, sans-serif' },
+  { id: "times-new-roman", label: "Times New Roman (Serif)", css: '"Times New Roman", Times, serif' },
+  { id: "georgia", label: "Georgia (Serif)", css: 'Georgia, "Times New Roman", serif' },
+  { id: "garamond", label: "Garamond (Serif)", css: 'Garamond, "Adobe Garamond Pro", "Times New Roman", serif' },
+  { id: "courier-new", label: "Courier New (Monospace)", css: '"Courier New", Courier, monospace' },
+  { id: "trebuchet-ms", label: "Trebuchet MS", css: '"Trebuchet MS", "Segoe UI", sans-serif' },
+  { id: "comic-sans-ms", label: "Comic Sans MS (Playful)", css: '"Comic Sans MS", "Comic Sans", cursive' },
+  { id: "verdana", label: "Verdana", css: 'Verdana, Geneva, sans-serif' },
+  { id: "palatino", label: "Palatino (Serif)", css: '"Palatino Linotype", Palatino, "Book Antiqua", serif' },
+  { id: "bookman", label: "Bookman (Serif)", css: '"Bookman Old Style", Bookman, "URW Bookman", serif' },
+  { id: "rounded-quicksand", label: "Rounded (Quicksand)", css: 'Quicksand, "Arial Rounded MT Bold", "Segoe UI", sans-serif', google: "Quicksand:wght@400;500;600;700" },
 ] as const;
 
 export type AppearancePreferences = {
@@ -49,6 +74,7 @@ export type AppearancePreferences = {
   scheme: (typeof appearanceSchemes)[number]["id"];
   font: (typeof appearanceFonts)[number]["id"];
   mode: "system" | "light" | "dark";
+  sidebarCollapsed: boolean;
 };
 
 export const defaultAppearance: AppearancePreferences = {
@@ -56,6 +82,7 @@ export const defaultAppearance: AppearancePreferences = {
   scheme: "hidc-navy",
   font: "system-ui",
   mode: "light",
+  sidebarCollapsed: false,
 };
 
 export type AppearanceTokens = Record<"--bg" | "--panel" | "--panel2" | "--border" | "--text" | "--muted" | "--teal" | "--teal-bg" | "--action-bg" | "--action-border" | "--action-text" | "--action-hover" | "--action-hover-border" | "--danger" | "--danger-bg" | "--field-bg" | "--field-border", string>;
@@ -71,24 +98,26 @@ export function appearanceTokens(schemeId: AppearancePreferences["scheme"], mode
   const accent = dark ? palette.darkAccent : palette.accent;
   const highContrast = palette.contrast;
   const bg = highContrast
-    ? dark ? "#000000" : "#ffffff"
-    : hsl(hue, Math.min(sat, 32), dark ? 6 : 97);
+    ? dark ? palette.id === "high-contrast-light" ? "#0a0a0a" : "#000000" : "#ffffff"
+    : palette.id === "hidc-navy" && dark
+      ? "#000000"
+    : hsl(hue, Math.min(sat, 82), dark ? 7 : 93);
   const panel = highContrast
-    ? dark ? "#050505" : "#ffffff"
-    : hsl(hue, Math.min(sat, 28), dark ? 11 : 100);
+    ? dark ? palette.id === "high-contrast-light" ? "#161616" : "#050505" : "#ffffff"
+    : hsl(hue, Math.min(sat, 82), dark ? 13 : 98);
   const panel2 = highContrast
-    ? dark ? "#101010" : "#f1f1f1"
-    : hsl(hue, Math.min(sat, 26), dark ? 16 : 94);
+    ? dark ? palette.id === "high-contrast-light" ? "#252525" : "#101010" : "#f1f1f1"
+    : hsl(hue, Math.min(sat, 82), dark ? 21 : 87);
   const border = highContrast
-    ? dark ? "#a8a8a8" : "#252525"
-    : hsl(hue, Math.min(sat, 20), dark ? 27 : 82);
+    ? dark ? palette.id === "high-contrast-light" ? "#c2c2c2" : "#a8a8a8" : "#252525"
+    : hsl(hue, Math.min(sat, 62), dark ? 36 : 68);
   return {
     "--bg": bg,
     "--panel": panel,
     "--panel2": panel2,
     "--border": border,
     "--text": dark ? "#f5f7fa" : "#172331",
-    "--muted": dark ? "#b2bfcc" : "#526272",
+    "--muted": dark ? "#d1dbe5" : "#405060",
     "--teal": accent,
     "--teal-bg": dark ? `color-mix(in srgb, ${accent} 19%, ${panel})` : `color-mix(in srgb, ${accent} 13%, ${panel})`,
     "--action-bg": dark ? accent : `color-mix(in srgb, ${accent} 24%, white)`,
@@ -112,6 +141,7 @@ export function applyAppearance(preferences: AppearancePreferences, effectiveMod
   root.dataset.appearanceTemplate = preferences.template;
   root.dataset.appearanceScheme = preferences.scheme;
   root.dataset.appearanceFont = preferences.font;
+  root.dataset.appearanceSidebarCollapsed = String(preferences.sidebarCollapsed);
   for (const [name, value] of Object.entries(appearanceTokens(preferences.scheme, mode)))
     root.style.setProperty(name, value);
   const selectedFont = (appearanceFonts.find(({ id }) => id === preferences.font) ?? appearanceFonts[appearanceFonts.length - 1]) as AppearanceFont;
@@ -131,9 +161,22 @@ export function applyAppearance(preferences: AppearancePreferences, effectiveMod
 export function isAppearancePreferences(value: unknown): value is AppearancePreferences {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
-  return Object.keys(candidate).sort().join(",") === "font,mode,scheme,template" &&
+  const keys = Object.keys(candidate).sort().join(",");
+  return (keys === "font,mode,scheme,template" || keys === "font,mode,scheme,sidebarCollapsed,template") &&
+    (candidate.sidebarCollapsed === undefined || typeof candidate.sidebarCollapsed === "boolean") &&
     appearanceTemplates.some(({ id }) => id === candidate.template) &&
     appearanceSchemes.some(({ id }) => id === candidate.scheme) &&
     appearanceFonts.some(({ id }) => id === candidate.font) &&
     ["system", "light", "dark"].includes(candidate.mode as string);
+}
+
+export function normalizeAppearancePreferences(value: unknown): AppearancePreferences {
+  if (!isAppearancePreferences(value)) return defaultAppearance;
+  return {
+    template: value.template,
+    scheme: value.scheme,
+    font: value.font,
+    mode: value.mode,
+    sidebarCollapsed: value.sidebarCollapsed ?? false,
+  };
 }

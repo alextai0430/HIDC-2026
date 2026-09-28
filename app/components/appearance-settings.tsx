@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Check, RotateCcw } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Check, PanelLeft, RotateCcw } from "lucide-react";
 import {
   AppearancePreferences,
   appearanceFonts,
   appearanceSchemes,
   appearanceTemplates,
+  appearanceTokens,
   defaultAppearance,
 } from "@/lib/appearance";
 
@@ -87,6 +88,12 @@ export default function AppearanceSettings({
   }
 
   const selectedFont = appearanceFonts.find((font) => font.id === draft.font)!;
+  const previewMode = draft.mode === "dark"
+    ? "dark"
+    : draft.mode === "system" && typeof document !== "undefined" && document.documentElement.dataset.theme === "dark"
+      ? "dark"
+      : "light";
+  const previewTokens = appearanceTokens(draft.scheme, previewMode) as CSSProperties;
   return (
     <section className="appearance-settings" aria-labelledby="appearance-heading">
       <div className="appearance-heading">
@@ -140,8 +147,8 @@ export default function AppearanceSettings({
             >
               <span className="scheme-swatches" aria-hidden="true">
                 <i style={{ backgroundColor: scheme.accent }} />
-                <i style={{ backgroundColor: scheme.darkAccent }} />
-                <i style={{ backgroundColor: scheme.hue === 220 && scheme.saturation === 0 ? "#7d8793" : `hsl(${scheme.hue} ${Math.min(scheme.saturation, 30)}% 88%)` }} />
+                <i style={{ backgroundColor: `hsl(${scheme.hue} ${Math.min(scheme.saturation, 82)}% 87%)` }} />
+                <i style={{ backgroundColor: `hsl(${scheme.hue} ${Math.min(scheme.saturation, 82)}% 13%)` }} />
               </span>
               <span>{scheme.label}</span>
               {draft.scheme === scheme.id ? <Check size={13} aria-hidden="true" /> : null}
@@ -167,15 +174,43 @@ export default function AppearanceSettings({
         </label>
       </div>
 
-      <div className="appearance-preview" aria-label="Live appearance preview">
-        <div className="appearance-preview-topline"><span>HIDC 2026</span><span>{selectedFont.label}</span></div>
-        <p style={{ fontFamily: selectedFont.css }}>Clear scores, readable controls, confident judging.</p>
-        <div className="appearance-preview-controls">
-          <span className="category-preview gold"># · 2D</span>
-          <span className="category-preview green">T · 1D</span>
-          <span className="category-preview blue">O · 2D</span>
-          <span className="category-preview selected-preview">Selected 3D</span>
-          <span className="appearance-preview-status"><i /> Synced</span>
+      {draft.template === "sidebar-workspace" ? (
+        <button
+          type="button"
+          className={`sidebar-appearance-toggle ${draft.sidebarCollapsed ? "is-collapsed" : ""}`}
+          aria-pressed={draft.sidebarCollapsed}
+          onClick={() => update({ sidebarCollapsed: !draft.sidebarCollapsed })}
+        >
+          <PanelLeft size={16} aria-hidden="true" />
+          {draft.sidebarCollapsed ? "Sidebar collapsed" : "Sidebar expanded"}
+          <span>{draft.sidebarCollapsed ? "It can be restored from the app header." : "A collapse control remains in the app header."}</span>
+        </button>
+      ) : null}
+
+      <div
+        className={`appearance-preview ${draft.template}`}
+        data-template={draft.template}
+        data-theme={previewMode}
+        style={previewTokens}
+        aria-label="Live scoring interface preview"
+      >
+        <div className="appearance-preview-topline"><span>HIDC 2026 · Judge Console · {appearanceTemplates.find((template) => template.id === draft.template)?.label}</span><span>{selectedFont.label} · {appearanceSchemes.find((scheme) => scheme.id === draft.scheme)?.label} · {draft.mode}</span></div>
+        <div className="appearance-preview-workspace">
+          {draft.template === "sidebar-workspace" && !draft.sidebarCollapsed ? <div className="appearance-preview-sidebar"><i /><i /><i /></div> : null}
+          <div className="appearance-preview-main">
+            <div className="appearance-preview-competitor"><span>ACTIVE COMPETITOR</span><b>01 · Demonstration Entry</b><small>Synced</small></div>
+            <div className="appearance-preview-panel">
+              <div className="appearance-preview-panel-heading"><b>Technical Scoring</b><span>Trick Selection</span></div>
+              <p style={{ fontFamily: selectedFont.css }}>Clear scores, readable controls, confident judging.</p>
+              <div className="appearance-preview-controls">
+                <span className="category-preview gold"># · 2D</span>
+                <button type="button" className="category-preview green">Toss · 1D</button>
+                <button type="button" className="category-preview blue selected-preview">Orbit · 2D</button>
+                <span className="category-preview purple">Feature</span>
+              </div>
+              <div className="appearance-preview-footer"><span>Save status</span><b><i /> Synced</b><button type="button" className="primary">Submit</button></div>
+            </div>
+          </div>
         </div>
       </div>
 

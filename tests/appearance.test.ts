@@ -11,6 +11,7 @@ import {
   appearanceTokens,
   defaultAppearance,
   isAppearancePreferences,
+  normalizeAppearancePreferences,
   type AppearancePreferences,
 } from "../lib/appearance";
 import { sanitizeWorkspace } from "../lib/local";
@@ -132,20 +133,29 @@ function contrast(a: string, b: string) {
 
 test("all appearance choices have safe values for every theme combination", () => {
   assert.equal(appearanceTemplates.length, 5);
-  assert.equal(appearanceSchemes.length, 20);
-  assert.equal(appearanceFonts.length, 10);
+  assert.equal(appearanceSchemes.length, 35);
+  assert.equal(appearanceFonts.length, 20);
+  assert.equal(new Set(appearanceFonts.map((font) => font.css)).size, appearanceFonts.length);
   assert.ok(isAppearancePreferences(defaultAppearance));
+  assert.deepEqual(normalizeAppearancePreferences({ template: "control-room", scheme: "hidc-navy", font: "system-ui", mode: "light" }), defaultAppearance);
+  for (const mode of ["light", "dark"] as const) {
+    assert.ok(new Set(appearanceSchemes.map((scheme) => appearanceTokens(scheme.id, mode)["--bg"])).size >= 34, `${mode} backgrounds are visually distinct`);
+    assert.ok(new Set(appearanceSchemes.map((scheme) => appearanceTokens(scheme.id, mode)["--panel2"])).size >= 34, `${mode} input/panel surfaces are visually distinct`);
+  }
   for (const template of appearanceTemplates)
     for (const scheme of appearanceSchemes)
       for (const font of appearanceFonts)
         for (const mode of ["light", "dark"] as const) {
-          const preferences = { template: template.id, scheme: scheme.id, font: font.id, mode } as AppearancePreferences;
+          const preferences = { ...defaultAppearance, template: template.id, scheme: scheme.id, font: font.id, mode } as AppearancePreferences;
           assert.ok(isAppearancePreferences(preferences));
           const tokens = appearanceTokens(preferences.scheme, mode);
-          const text = mode === "dark" ? "#f5f7fa" : "#172331";
-          const muted = mode === "dark" ? "#b2bfcc" : "#526272";
+          const text = tokens["--text"];
+          const muted = tokens["--muted"];
           assert.ok(contrast(text, tokens["--bg"]) >= 4.5, `${scheme.label} ${mode} body contrast`);
+          assert.ok(contrast(text, tokens["--panel"]) >= 4.5, `${scheme.label} ${mode} panel text contrast`);
+          assert.ok(contrast(text, tokens["--panel2"]) >= 4.5, `${scheme.label} ${mode} input text contrast`);
           assert.ok(contrast(muted, tokens["--bg"]) >= 4.5, `${scheme.label} ${mode} muted contrast`);
+          assert.ok(contrast(muted, tokens["--panel2"]) >= 4.5, `${scheme.label} ${mode} muted input contrast`);
           assert.equal(tokens["--teal"], mode === "dark" ? scheme.darkAccent : scheme.accent);
         }
 });
@@ -153,7 +163,7 @@ test("all appearance choices have safe values for every theme combination", () =
 test("offline workspace cache keeps only the current user's appearance and queued updates", () => {
   const ownId = "judge-offline";
   const localChoice: AppearancePreferences = {
-    template: "sidebar-workspace", scheme: "sand", font: "lato", mode: "system",
+    template: "sidebar-workspace", scheme: "sand", font: "lato", mode: "system", sidebarCollapsed: true,
   };
   const cached = sanitizeWorkspace({
     snapshot: {
@@ -192,7 +202,7 @@ test("appearance API serves and saves only the signed-in profile, without accept
   const secondUpdatedAt = new Date(Date.now() + 60_000).toISOString();
   const thirdUpdatedAt = new Date(Date.now() + 90_000).toISOString();
   const firstChoice: AppearancePreferences = {
-    template: "focus-mode", scheme: "arctic", font: "atkinson-hyperlegible", mode: "dark",
+    template: "focus-mode", scheme: "arctic", font: "atkinson-hyperlegible", mode: "dark", sidebarCollapsed: false,
   };
   const saved = await fixture.handlers.PATCH(request("PATCH", {
     preferences: firstChoice,

@@ -1,5 +1,5 @@
 import { identity } from "@/lib/server";
-import { defaultAppearance, isAppearancePreferences } from "@/lib/appearance";
+import { normalizeAppearancePreferences, isAppearancePreferences } from "@/lib/appearance";
 
 export const dynamic = "force-dynamic";
 
@@ -21,9 +21,7 @@ export async function GET(req: Request) {
   try {
     const { profile } = await identity(req);
     return json({
-      preferences: isAppearancePreferences(profile.appearance_preferences)
-        ? profile.appearance_preferences
-        : defaultAppearance,
+      preferences: normalizeAppearancePreferences(profile.appearance_preferences),
       updatedAt: profile.appearance_updated_at ?? new Date(0).toISOString(),
     });
   } catch (error) {
@@ -41,6 +39,7 @@ export async function PATCH(req: Request) {
       typeof input.updatedAt !== "string" || !Number.isFinite(Date.parse(input.updatedAt))) {
       return json({ error: "Choose a valid appearance before saving." }, 400);
     }
+    const preferences = normalizeAppearancePreferences(input.preferences);
     const requestedAt = new Date(input.updatedAt).toISOString();
     if (Date.parse(requestedAt) > Date.now() + 5 * 60 * 1000)
       return json({ error: "This device clock is too far ahead to sync appearance settings." }, 400);
@@ -54,15 +53,13 @@ export async function PATCH(req: Request) {
       return json({
         saved: false,
         conflict: true,
-        preferences: isAppearancePreferences(current.data.appearance_preferences)
-          ? current.data.appearance_preferences
-          : defaultAppearance,
+        preferences: normalizeAppearancePreferences(current.data.appearance_preferences),
         updatedAt: current.data.appearance_updated_at,
       });
     }
     const update = await client.from("profiles")
       .update({
-        appearance_preferences: input.preferences,
+        appearance_preferences: preferences,
         appearance_updated_at: requestedAt,
       })
       .eq("id", profile.id)
@@ -70,7 +67,7 @@ export async function PATCH(req: Request) {
       .select("appearance_preferences,appearance_updated_at")
       .maybeSingle();
     if (update.error) throw update.error;
-    if (update.data) return json({ saved: true, conflict: false, preferences: update.data.appearance_preferences, updatedAt: update.data.appearance_updated_at });
+    if (update.data) return json({ saved: true, conflict: false, preferences: normalizeAppearancePreferences(update.data.appearance_preferences), updatedAt: update.data.appearance_updated_at });
 
     const current = await client.from("profiles")
       .select("appearance_preferences,appearance_updated_at")
@@ -80,9 +77,7 @@ export async function PATCH(req: Request) {
     return json({
       saved: false,
       conflict: true,
-      preferences: isAppearancePreferences(current.data.appearance_preferences)
-        ? current.data.appearance_preferences
-        : defaultAppearance,
+      preferences: normalizeAppearancePreferences(current.data.appearance_preferences),
       updatedAt: current.data.appearance_updated_at,
     });
   } catch (error) {
