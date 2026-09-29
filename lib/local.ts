@@ -1,7 +1,6 @@
 import { openDB } from "idb";
 import { Operation, Snapshot, Submission } from "./model";
 import { normalizeAppearancePreferences, type AppearancePreferences } from "./appearance";
-import { canViewOwnPerformancePoints } from "./scoped";
 const database = () =>
   openDB("hidc-2026", 1, {
     upgrade(db) {
@@ -47,22 +46,17 @@ export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
   snapshot.submissions = snapshot.submissions
     .filter((s) => s.user_id === snapshot.profile.id)
     .map((s) => {
-      const preservePerformance = canViewOwnPerformancePoints(snapshot.profile, s);
-      if (!preservePerformance) delete s.total;
+      delete s.total;
       s.events.forEach((e) => {
         delete e.value;
       });
-      if (!preservePerformance) s.performance = [];
+      s.performance = [];
       return s;
     });
   delete snapshot.audit;
   delete snapshot.rankings;
   delete snapshot.profiles;
-  snapshot.personal = snapshot.personal?.map(({ competitor_id, rank, total }) => {
-    const ownPerformance = snapshot.submissions.some((submission) =>
-      submission.competitor_id === competitor_id && canViewOwnPerformancePoints(snapshot.profile, submission));
-    return { competitor_id, rank, ...(ownPerformance && total !== undefined ? { total } : {}) };
-  });
+  snapshot.personal = snapshot.personal?.map(({ competitor_id, rank }) => ({ competitor_id, rank }));
   return cached;
 }
 export function applyLocal(snapshot: Snapshot, op: Operation): Snapshot {
@@ -81,7 +75,7 @@ export function applyLocal(snapshot: Snapshot, op: Operation): Snapshot {
       competitor_id: op.competitor_id,
       user_id: state.profile.id,
       slot: assignment?.slot ?? state.profile.slot ?? 1,
-      scoring_type: assignment?.scoring_type ?? (state.profile.role === "performance_judge" ? "performance" : state.profile.role === "judge" && (state.profile.slot ?? 1) > 3 ? "performance" : "technical"),
+      scoring_type: assignment?.scoring_type ?? (state.profile.role === "performance_judge" ? "performance" : "technical"),
       events: [],
       performance: [0, 0, 0, 0, 0, 0],
       finished: false,

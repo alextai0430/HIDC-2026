@@ -135,7 +135,7 @@ export function calculateScoringConfigurationImpact(
   let technicalEventValues = 0;
 
   for (const submission of submissions) {
-    if ((submission.scoring_type ?? (submission.slot <= 3 ? "technical" : "performance")) !== "technical") continue;
+    if (submission.scoring_type !== "technical") continue;
     for (const event of submission.events) {
       if (eventScore(event, oldRules) === eventScore(event, newRules)) continue;
       technicalEventValues++;

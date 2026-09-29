@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { canManageScoringConfiguration } from "@/lib/access";
-import { requestHasAdminUnlock } from "@/lib/admin-unlock";
+import { requestHasPointAccess } from "@/lib/admin-unlock";
 import { failure, identity } from "@/lib/server";
 import {
   calculateScoringConfigurationImpact,
@@ -173,8 +173,8 @@ function authorizationFailure(req: Request, profile: Profile) {
   if (!canManageScoringConfiguration(profile)) {
     return Response.json({ error: "Technical point configuration access denied." }, { status: 403, headers: { "Cache-Control": "no-store" } });
   }
-  if (!requestHasAdminUnlock(req, profile.id)) {
-    return Response.json({ error: "Unlock the Admin tab before opening technical point configuration." }, { status: 403, headers: { "Cache-Control": "no-store" } });
+  if (!requestHasPointAccess(req, profile.id)) {
+    return Response.json({ error: "Unlock Admin and turn on Show Points before opening technical point configuration." }, { status: 403, headers: { "Cache-Control": "no-store" } });
   }
   return null;
 }

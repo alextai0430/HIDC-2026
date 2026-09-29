@@ -65,7 +65,6 @@ import {
   detailSubmissions,
   ownSubmissions,
   personalScoreExportRows,
-  canViewOwnPerformancePoints,
 } from "@/lib/scoped";
 
 const defaultKeys: Record<string, string> = {
@@ -163,9 +162,9 @@ const hotkeyActionLabel = (action: string) => {
 };
 type ScoringType = "technical" | "performance";
 type JudgeAssignment = { division: string; slot: number; user_id: string; scoring_type?: ScoringType };
-const profileScoringType = (profile?: Profile | null): ScoringType => profile?.role === "performance_judge" || profile?.role === "judge" && (profile.slot ?? 1) > 3 ? "performance" : "technical";
+const profileScoringType = (profile?: Profile | null): ScoringType => profile?.role === "performance_judge" ? "performance" : "technical";
 const assignmentScoringType = (assignment?: JudgeAssignment, profile?: Profile): ScoringType =>
-  assignment?.scoring_type ?? (assignment ? (assignment.slot <= 3 ? "technical" : "performance") : profileScoringType(profile));
+  assignment?.scoring_type ?? profileScoringType(profile);
 const roleLabel = (role: Profile["role"]) => role === "technical_judge" ? "Technical Judge" : role === "performance_judge" ? "Performance Judge" : "Organizer";
 const profileRoleLabel = (profile: Profile, scoringType?: ScoringType) => profile.role === "judge"
   ? `${scoringType === "performance" ? "Performance" : "Technical"} Judge`
@@ -322,9 +321,9 @@ export default function Page() {
   const canViewPoints =
     adminUnlocked && showPoints && !!adminUnlockToken && state?.pointAccess === true;
   const canViewSubmissionPoints = (submission?: Submission) =>
-    !!submission && (canViewPoints || (!!profile && canViewOwnPerformancePoints(profile, submission)));
+    !!submission && canViewPoints;
   const canViewPersonalPoints = (competitorId: string) =>
-    canViewPoints || !!profile && !!state?.submissions.some((submission) => submission.competitor_id === competitorId && canViewOwnPerformancePoints(profile, submission));
+    canViewPoints && !!state?.submissions.some((submission) => submission.competitor_id === competitorId);
   const active = state?.competitors.find(
     (c) => c.status === "active" && !c.archived,
   );
@@ -446,7 +445,7 @@ export default function Page() {
         const scoringType = assignmentScoringType(judge, judgeProfile);
         const submission = state?.submissions.find(
           (s) => s.competitor_id === competitor.id && (s.user_id === judge.user_id || s.historical_user_id === judge.user_id) &&
-            (s.scoring_type ?? (s.slot > 3 ? "performance" : "technical")) === scoringType,
+            s.scoring_type === scoringType,
         );
         return {
           ...judge,
@@ -676,7 +675,7 @@ export default function Page() {
         "state",
         undefined,
         adminUnlocked && showPoints && adminUnlockToken
-          ? { adminUnlockToken }
+          ? { adminUnlockToken, showPoints: true }
           : undefined,
       ),
     [adminUnlocked, adminUnlockToken, showPoints],
@@ -1465,6 +1464,7 @@ export default function Page() {
     try {
       const snapshot: Snapshot = await api("state", undefined, {
         adminUnlockToken,
+        showPoints: true,
       });
       if (!snapshot.pointAccess) {
         setAdminUnlocked(false);
@@ -2638,7 +2638,7 @@ export default function Page() {
             <div className="panel-heading">
               <h3>Submission Details</h3>
             </div>
-            {(canViewPoints || personalSubmissions.some((submission) => profile && canViewOwnPerformancePoints(profile, submission))) && <div className="exports">
+            {canViewPoints && <div className="exports">
               {(["csv", "txt"] as const).map((format) => (
                 <button
                   key={format}
@@ -2662,7 +2662,7 @@ export default function Page() {
                 </button>
               ))}
             </div>}
-            {!canViewPoints && <p className="masked-points-note" role="status">Unlock Admin and turn on Show Points to export full score details. Your own performance scores remain visible.</p>}
+            {!canViewPoints && <p className="masked-points-note" role="status">Unlock Admin and turn on Show Points to export full score details.</p>}
             {visibleSubmissions.map((s) => (
               <details className="submission-detail" key={s.id}>
                 <summary>
@@ -2672,7 +2672,7 @@ export default function Page() {
                         ?.name
                     }
                   </span>
-                  <span>{s.scoring_type === "performance" || (s.scoring_type === undefined && s.slot > 3) ? "Performance" : "Technical"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? (s.user_id === profile?.id ? profile.name : s.judge_name_snapshot ?? "Deleted Judge")}</span>
+                  <span>{s.scoring_type === "performance" ? "Performance" : s.scoring_type === "technical" ? "Technical" : "Unknown scoring type"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? (s.user_id === profile?.id ? profile.name : s.judge_name_snapshot ?? "Deleted Judge")}</span>
                   <span>
                     {s.finished ? "Submitted" : "Draft"}
                     {s.dq ? " · DQ" : ""}
@@ -2739,7 +2739,7 @@ export default function Page() {
                     ? ` · Submitted ${new Date(s.submitted_at).toLocaleString()}`
                     : ""}
                 </p>
-                {(s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) === "technical"
+                {s.scoring_type === "technical"
                   ? s.events.map((e, i) => (
                       <SubmissionEventDetail key={e.id} event={e} index={i} revealPoints={canViewPoints} />
                     ))
@@ -2757,7 +2757,7 @@ export default function Page() {
             {server && (
               <>
                 <h3 className="audit-title">Audit History</h3>
-                {!demo && !!state.audit?.length && (
+                {!demo && canViewPoints && !!state.audit?.length && (
                   <button
                     style={{ margin: 20 }}
                     onClick={async () => {
@@ -2765,7 +2765,7 @@ export default function Page() {
                         const older = await api(
                           `audit?before=${state.audit![state.audit!.length - 1].id}`,
                           undefined,
-                          adminUnlockToken ? { adminUnlockToken } : undefined,
+                          adminUnlockToken ? { adminUnlockToken, showPoints: true } : undefined,
                         );
                         if (!older.length) {
                           setNotice("No earlier audit records.");
@@ -2865,14 +2865,14 @@ export default function Page() {
                 {showPoints ? "Hide Points" : "Show Points"}
               </button>
             </div>
-            {(canViewPoints || personalSubmissions.some((submission) => profile && canViewOwnPerformancePoints(profile, submission))) && exports((format, ranked) => {
+            {canViewPoints && exports((format, ranked) => {
               const ordered = [...personalSubmissions].sort((a, b) =>
                 ranked
                   ? (b.total ?? 0) - (a.total ?? 0)
                   : a.updated_at.localeCompare(b.updated_at),
               );
               download(
-                personalScoreExportRows(profile!, ordered, state.competitors),
+                personalScoreExportRows(profile!, ordered, state.competitors, canViewPoints),
                 format,
                 "my-scores",
               );
@@ -2892,7 +2892,7 @@ export default function Page() {
                   </span>
                   <span>Total {canViewSubmissionPoints(s) && s.total !== undefined ? fmt(s.total) : "***"}</span>
                 </summary>
-                {(s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) === "technical"
+                {s.scoring_type === "technical"
                   ? s.events.map((e, i) => (
                       <SubmissionEventDetail key={e.id} event={e} index={i} revealPoints={canViewPoints} />
                     ))
@@ -3123,7 +3123,7 @@ export default function Page() {
                 </div>
               </div>
             </section>
-            {canManageScoringConfig && adminUnlocked && adminUnlockToken ? (
+            {canManageScoringConfig && adminUnlocked && showPoints && adminUnlockToken ? (
               <TechnicalPointConfiguration
                 adminUnlockToken={adminUnlockToken}
                 queuedActions={workspace?.queue.length ?? 0}

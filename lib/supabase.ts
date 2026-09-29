@@ -21,6 +21,7 @@ export async function api<T = any>(
   body?: unknown,
   options?: {
     adminUnlockToken?: string;
+    showPoints?: boolean;
     method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   },
 ) {
@@ -33,6 +34,7 @@ export async function api<T = any>(
       ...(options?.adminUnlockToken
         ? { "x-hidc-admin-unlock": options.adminUnlockToken }
         : {}),
+      ...(options?.showPoints ? { "x-hidc-show-points": "1" } : {}),
     },
     body: hasBody ? JSON.stringify(body) : undefined,
   });

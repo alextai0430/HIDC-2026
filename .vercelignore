@@ -1,0 +1,12 @@
+# Local-only build snapshots and generated artifacts are not application assets.
+.next-demo-preview-build/
+.next-execution-build/
+.next-execution-buttons-preview/
+.next-live-sync-build/
+.next-stale-preview-cache/
+.next-production-cache/
+.next-production-cache-20260927/
+.next-build/
+.next-role-build/
+tsconfig.tsbuildinfo
+output/

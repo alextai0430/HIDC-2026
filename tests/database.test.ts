@@ -15,7 +15,7 @@ const migration = (suffix: string) => {
 test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and attribution", async () => {
   const db = new PGlite();
   await db.exec(
-    `create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql as $$select null::uuid$$;create schema storage;create table storage.buckets(id text primary key,name text,public boolean,file_size_limit bigint,allowed_mime_types text[]);`,
+    `create role anon;create role authenticated;create role service_role bypassrls;create role supabase_admin;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql as $$select null::uuid$$;create schema storage;create table storage.buckets(id text primary key,name text,public boolean,file_size_limit bigint,allowed_mime_types text[]);`,
   );
   const sql = readFileSync("supabase/migrations/001_hidc.sql", "utf8").replace(
     "alter publication supabase_realtime add table public.competitors;",
@@ -639,6 +639,11 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   assert.ok((await db.query("select id from audit where action='account_reactivate' and user_id=$1", [admin])).rows.length > 0);
 
   await db.exec(migration("_approved_audit_integrity_fixes.sql"));
+  await db.exec(migration("_revoke_public_snapshot_trigger_exec.sql"));
+  await db.exec(migration("point_visibility_and_roster_validation.sql"));
+  await db.exec(migration("revoke_competitor_table_privileges.sql"));
+  await db.exec(migration("restrict_public_api_grants.sql"));
+  await db.exec(migration("active_live_signal_rls.sql"));
 
   // The approved migration blocks direct roster enumeration and snapshots each
   // division's exact 2–10-judge roster before any competitor can be created.
@@ -646,6 +651,30 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('authenticated','public.competitor_judges','select') as allowed")).rows[0].allowed, false);
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','public.snapshot_competitor_judges()','execute') as allowed")).rows[0].allowed, false);
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('authenticated','public.snapshot_competitor_judges()','execute') as allowed")).rows[0].allowed, false);
+  for (const role of ["anon", "authenticated"]) {
+    for (const privilege of ["select", "insert", "update", "delete", "truncate"]) {
+      assert.equal(
+        (await db.query<{ allowed: boolean }>(`select has_table_privilege('${role}','public.competitors','${privilege}') as allowed`)).rows[0].allowed,
+        false,
+        `${role} must not have ${privilege.toUpperCase()} privilege on competitors`,
+      );
+    }
+  }
+  assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('service_role','public.competitors','truncate') as allowed")).rows[0].allowed, true);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('anon','public.divisions','truncate') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('authenticated','public.profiles','update') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('authenticated','public.live_signal','select') as allowed")).rows[0].allowed, true);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('anon','public.live_signal','select') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_schema_privilege('authenticated','private','usage') as allowed")).rows[0].allowed, true);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_schema_privilege('anon','private','usage') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('authenticated','private.hidc_active_user()','execute') as allowed")).rows[0].allowed, true);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','private.hidc_active_user()','execute') as allowed")).rows[0].allowed, false);
+  assert.match(
+    (await db.query<{ qual: string }>("select qual from pg_policies where schemaname='public' and tablename='live_signal' and policyname='live_read'")).rows[0].qual,
+    /private\.hidc_active_user/,
+  );
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','public.manage_competitor(uuid,text,jsonb,boolean)','execute') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('service_role','public.manage_competitor(uuid,text,jsonb,boolean)','execute') as allowed")).rows[0].allowed, true);
   const expectedIndexes = [
     "competitors_division_position_idx",
     "division_judges_user_id_idx",
@@ -723,6 +752,14 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Audit Five", JSON.stringify(assignmentsTwo)]),
     /roster is locked/,
   );
+
+  await db.query("update competitor_judges set expected=false where competitor_id=$1 and scoring_type='performance'", [twoCompetitor]);
+  await assert.rejects(
+    db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: twoCompetitor })]),
+    /invalid finalized judge roster.*2–10.*Technical and Performance/i,
+    "activation rejects a frozen roster missing a scoring group",
+  );
+  await db.query("update competitor_judges set expected=true where competitor_id=$1 and scoring_type='performance'", [twoCompetitor]);
 
   const issueWindow = async (competitorId: string, judgeId: string) => {
     const result = await db.query<{ window: { competitor_id: string; revision: string; token: string; opened_at: string } }>(

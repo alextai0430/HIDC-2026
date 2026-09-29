@@ -77,3 +77,8 @@ export function requestHasAdminUnlock(req: Request, userId: string) {
     userId,
   );
 }
+
+export function requestHasPointAccess(req: Request, userId: string) {
+  return requestHasAdminUnlock(req, userId) &&
+    req.headers.get("x-hidc-show-points") === "1";
+}

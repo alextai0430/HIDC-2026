@@ -12,11 +12,12 @@ export function ownSubmissions(profile: Profile, submissions: Submission[]) {
 }
 
 export function isPerformanceSubmission(submission: Submission) {
-  return (submission.scoring_type ?? (submission.slot > 3 ? "performance" : "technical")) === "performance";
+  return submission.scoring_type === "performance";
 }
 
-// Performance values are visible to their judge because those values are the
-// judge's own ratings. Technical point values remain behind the Admin gate.
+// This helper only controls whether an authenticated judge's own performance
+// values are retained in the private offline cache. Display/API access still
+// requires Admin unlock plus the in-memory Show Points switch.
 export function canViewOwnPerformancePoints(profile: Profile, submission: Submission) {
   return ["performance_judge", "organizer", "server_admin", "judge"].includes(profile.role) &&
     submission.user_id === profile.id && isPerformanceSubmission(submission);
@@ -38,7 +39,7 @@ export function detailExportRows(
   return detailSubmissions(profile, submissions).map((s) => ({
     Competitor: competitors.find((c) => c.id === s.competitor_id)?.name,
     Judge: s.user_id === profile.id ? profile.name : profiles.find((candidate) => candidate.id === s.user_id)?.name ?? s.judge_name_snapshot ?? "Deleted Judge",
-    Scoring: s.scoring_type ?? (s.slot <= 3 ? "Technical" : "Performance"),
+    Scoring: s.scoring_type ?? "Unknown",
     Status: s.finished ? "Submitted" : "Draft",
     DQ: s.dq,
     Updated: s.updated_at,
@@ -54,7 +55,7 @@ export function detailExportRows(
         execution: executionLabels[e.execution ?? "E0"],
       })),
     ),
-    ...(revealPoints || canViewOwnPerformancePoints(profile, s)
+    ...(revealPoints
       ? { Total: s.total, Performance: s.performance.join(" / ") }
       : {}),
   }));
@@ -67,12 +68,11 @@ export function personalScoreExportRows(
   revealPoints = false,
 ) {
   return ownSubmissions(profile, submissions).map((s) => {
-    const mayReveal = revealPoints || canViewOwnPerformancePoints(profile, s);
-    const type = s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance");
+    const type = s.scoring_type;
     return {
       Competitor: competitors.find((c) => c.id === s.competitor_id)?.name,
       Status: s.finished ? "Submitted" : "Draft",
-      Total: mayReveal ? s.total ?? "—" : "***",
+      Total: revealPoints ? s.total ?? "—" : "***",
       ...(type === "technical"
         ? {
             Events: JSON.stringify(
@@ -86,7 +86,9 @@ export function personalScoreExportRows(
               })),
             ),
           }
-        : Object.fromEntries(categories.map((c, i) => [c, mayReveal ? s.performance[i] : "***"]))),
+        : type === "performance"
+          ? Object.fromEntries(categories.map((c, i) => [c, revealPoints ? s.performance[i] : "***"]))
+          : {}),
     };
   });
 }

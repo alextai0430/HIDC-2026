@@ -585,14 +585,11 @@ test("state endpoint masks score data until unlock and only returns own judge po
     const hiddenBody = await response.json();
     assert.equal(hiddenBody.pointAccess, false);
     for (const submission of hiddenBody.submissions) {
-      const ownPerformance = p.role === "performance_judge" && submission.user_id === p.id && submission.scoring_type === "performance";
-      assert.equal(submission.total, ownPerformance ? 30 : undefined);
-      assert.deepEqual(submission.performance, ownPerformance ? [5, 5, 5, 5, 5, 5] : []);
+      assert.equal(submission.total, undefined);
+      assert.deepEqual(submission.performance, []);
       assert.equal(submission.events[0].value, undefined);
     }
-    if (p.role === "performance_judge" && !access.isAdministrator(p)) {
-      assert.equal(hiddenBody.personal[0].total, 30);
-    }
+    assert.ok(hiddenBody.personal.every((entry: any) => entry.total === undefined));
     if (access.isAdministrator(p)) {
       assert.equal(hiddenBody.protected, true);
       assert.equal(hiddenBody.submissions.length, 5);
@@ -621,9 +618,22 @@ test("state endpoint masks score data until unlock and only returns own judge po
     }
 
     const unlockToken = createAdminUnlockToken(p.id);
-    const unlocked = await route("state", p, client).GET(
+    const unlockedButHidden = await route("state", p, client).GET(
       new Request("http://localhost/api/state", {
         headers: { "x-hidc-admin-unlock": unlockToken },
+      }),
+    );
+    assert.equal(unlockedButHidden.status, 200);
+    const stillHidden = await unlockedButHidden.json();
+    assert.equal(stillHidden.pointAccess, false, "Admin unlock alone must not reveal points");
+    for (const saved of stillHidden.submissions) {
+      assert.equal(saved.total, undefined);
+      assert.deepEqual(saved.performance, []);
+      assert.equal(saved.events[0].value, undefined);
+    }
+    const unlocked = await route("state", p, client).GET(
+      new Request("http://localhost/api/state", {
+        headers: { "x-hidc-admin-unlock": unlockToken, "x-hidc-show-points": "1" },
       }),
     );
     assert.equal(unlocked.status, 200);
@@ -687,6 +697,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
       competitor_id: competitor.id,
       user_id: alex.id,
       slot: 1,
+      scoring_type: "technical",
       events: [savedEvent],
       performance: [],
       finished: true,
@@ -748,12 +759,16 @@ test("technical point configuration requires the allowlist and active Admin unlo
     const handlers = route("scoring-configuration", alex, client);
     const withoutUnlock = await handlers.GET(new Request("http://localhost/api/scoring-configuration"));
     assert.equal(withoutUnlock.status, 403);
+    const unlockOnly = await handlers.GET(new Request("http://localhost/api/scoring-configuration", {
+      headers: { "x-hidc-admin-unlock": createAdminUnlockToken(alex.id) },
+    }));
+    assert.equal(unlockOnly.status, 403, "configuration values require Show Points as well as Admin unlock");
 
     for (const account of [alex, organizer]) {
       const token = createAdminUnlockToken(account.id);
       const response = await route("scoring-configuration", account, client).GET(
         new Request("http://localhost/api/scoring-configuration", {
-          headers: { "x-hidc-admin-unlock": token },
+          headers: { "x-hidc-admin-unlock": token, "x-hidc-show-points": "1" },
         }),
       );
       assert.equal(response.status, 200);
@@ -765,7 +780,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
       const token = createAdminUnlockToken(account.id);
       const response = await route("scoring-configuration", account, client).GET(
         new Request("http://localhost/api/scoring-configuration", {
-          headers: { "x-hidc-admin-unlock": token },
+          headers: { "x-hidc-admin-unlock": token, "x-hidc-show-points": "1" },
         }),
       );
       assert.equal(response.status, 403);
@@ -777,7 +792,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
     const previewResponse = await route("scoring-configuration", alex, client).POST(
       new Request("http://localhost/api/scoring-configuration", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token },
+        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token, "x-hidc-show-points": "1" },
         body: JSON.stringify({ action: "preview", expectedRevision: 1, rules }),
       }),
     );
@@ -795,7 +810,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
     const missingConfirmation = await route("scoring-configuration", alex, client).POST(
       new Request("http://localhost/api/scoring-configuration", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token },
+        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token, "x-hidc-show-points": "1" },
         body: JSON.stringify({
           action: "update",
           expectedRevision: 1,
@@ -812,7 +827,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
     const confirmed = await route("scoring-configuration", alex, client).POST(
       new Request("http://localhost/api/scoring-configuration", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token },
+        headers: { "content-type": "application/json", "x-hidc-admin-unlock": token, "x-hidc-show-points": "1" },
         body: JSON.stringify({
           action: "update",
           expectedRevision: 1,
@@ -829,7 +844,7 @@ test("technical point configuration requires the allowlist and active Admin unlo
     assert.deepEqual(submission.events, [savedEvent], "rule changes preserve score selections and timestamps");
     const restoredHistory = await route("scoring-configuration", alex, client).GET(
       new Request("http://localhost/api/scoring-configuration", {
-        headers: { "x-hidc-admin-unlock": token },
+        headers: { "x-hidc-admin-unlock": token, "x-hidc-show-points": "1" },
       }),
     );
     assert.equal(restoredHistory.status, 200);
@@ -914,7 +929,7 @@ test("detail and export scopes exclude other judges and numeric values for ordin
   );
 });
 
-test("a performance judge can see and export only their own performance values without Admin unlock", () => {
+test("performance points stay masked until Admin unlock and Show Points are both active", () => {
   const competitor = {
     id: crypto.randomUUID(), name: "One", division: "Individual Open", position: 1,
     status: "locked" as const, archived: false, dq: false,
@@ -930,12 +945,15 @@ test("a performance judge can see and export only their own performance values w
   const visible = detailSubmissions(judge, [ownPerformance, otherPerformance]);
   assert.deepEqual(visible, [ownPerformance]);
   const detail = detailExportRows(judge, visible, [competitor]);
-  assert.equal(detail[0].Total, 15);
-  assert.equal(detail[0].Performance, "5 / 4 / 3 / 2 / 1 / 0");
+  assert.equal(detail[0].Total, undefined);
+  assert.equal(detail[0].Performance, undefined);
   assert.doesNotMatch(JSON.stringify(detail), new RegExp(otherPerformance.user_id));
   const personal = personalScoreExportRows(judge, visible, [competitor]);
-  assert.equal(personal[0].Total, 15);
-  assert.equal((personal[0] as Record<string, unknown>).Control, 5);
+  assert.equal(personal[0].Total, "***");
+  assert.equal((personal[0] as Record<string, unknown>).Control, "***");
+  const revealed = personalScoreExportRows(judge, visible, [competitor], true);
+  assert.equal(revealed[0].Total, 15);
+  assert.equal((revealed[0] as Record<string, unknown>).Control, 5);
 });
 
 test("organizers can create each supported account role without numbered slots", async () => {
@@ -1110,7 +1128,7 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
   assert.deepEqual(await storage.readLocal(alex.id), cached);
 });
 
-test("offline storage preserves only the signed-in performance judge's own rating values", () => {
+test("offline storage masks saved points until Admin unlock and Show Points are both active", () => {
   const judge: Profile = { ...judges[2], slot: 2 };
   const ownPerformance: Submission = {
     id: crypto.randomUUID(), competitor_id: crypto.randomUUID(), user_id: judge.id,
@@ -1124,7 +1142,7 @@ test("offline storage preserves only the signed-in performance judge's own ratin
     },
     queue: [],
   });
-  assert.deepEqual(cached.snapshot.submissions[0].performance, ownPerformance.performance);
-  assert.equal(cached.snapshot.submissions[0].total, 15);
-  assert.equal(cached.snapshot.personal?.[0].total, 15);
+  assert.deepEqual(cached.snapshot.submissions[0].performance, []);
+  assert.equal(cached.snapshot.submissions[0].total, undefined);
+  assert.equal(cached.snapshot.personal?.[0].total, undefined);
 });

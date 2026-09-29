@@ -100,7 +100,7 @@ export default function TechnicalPointConfiguration({
     let active = true;
     setLoading(true);
     setError("");
-    void api("scoring-configuration", undefined, { adminUnlockToken })
+    void api("scoring-configuration", undefined, { adminUnlockToken, showPoints: true })
       .then((configuration: ConfigurationWithHistory) => {
         if (!active) return;
         const nextDraft = toDraft(configuration.rules);
@@ -154,7 +154,7 @@ export default function TechnicalPointConfiguration({
         action: "preview",
         expectedRevision: revision,
         rules,
-      }, { adminUnlockToken });
+      }, { adminUnlockToken, showPoints: true });
       if (nextPreview.unchanged) {
         setMessage("No point values changed.");
         return;
@@ -180,7 +180,7 @@ export default function TechnicalPointConfiguration({
         rules: parseDraft(draft),
         impact: preview.impact,
         confirmation: confirmPhrase,
-      }, { adminUnlockToken });
+      }, { adminUnlockToken, showPoints: true });
       const nextDraft = toDraft(result.rules);
       setRevision(result.revision);
       setDraft(nextDraft);

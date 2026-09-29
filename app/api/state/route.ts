@@ -2,16 +2,15 @@ import { identity, failure } from "@/lib/server";
 import { eventScore, rankGlobal, total } from "@/lib/scoring";
 import { Submission } from "@/lib/model";
 import { canManage } from "@/lib/access";
-import { canViewOwnPerformancePoints } from "@/lib/scoped";
 import { sanitizeAuditRows } from "@/lib/audit";
-import { requestHasAdminUnlock } from "@/lib/admin-unlock";
+import { requestHasPointAccess } from "@/lib/admin-unlock";
 import { loadScoringConfiguration } from "@/lib/scoring-config";
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   try {
     const { client, profile } = await identity(req);
     const fullAccess = canManage(profile);
-    const revealPoints = requestHasAdminUnlock(req, profile.id);
+    const revealPoints = requestHasPointAccess(req, profile.id);
     const scoringConfiguration = await loadScoringConfiguration(client);
     const { data: allCompetitors, error } = await client
       .from("competitors")
@@ -30,12 +29,11 @@ export async function GET(req: Request) {
     const submissions = revealPoints
       ? databaseSubmissions
       : databaseSubmissions.map((submission) => {
-          const maySeeOwnPerformance = canViewOwnPerformancePoints(profile, submission);
           return {
             ...submission,
-            performance: maySeeOwnPerformance ? submission.performance : [],
+            performance: [],
             events: submission.events.map(({ value: _value, ...event }) => event),
-            ...(maySeeOwnPerformance ? { total: total(submission, scoringConfiguration.rules) } : { total: undefined }),
+            total: undefined,
           };
         });
     const own = submissions.filter(
@@ -47,7 +45,7 @@ export async function GET(req: Request) {
     const personal = own.map((s) => ({
       competitor_id: s.competitor_id,
       rank: 1,
-      ...(revealPoints || canViewOwnPerformancePoints(profile, s) ? { total: total(s, scoringConfiguration.rules) } : {}),
+      ...(revealPoints ? { total: total(s, scoringConfiguration.rules) } : {}),
     }));
     for (const division of new Set(allCompetitors!.map((c) => c.division))) {
       const sorted = own

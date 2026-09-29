@@ -27,11 +27,12 @@ const competitor = (id: string, division = "Individual Open"): Competitor => ({
   dq: false,
   archived: false,
 });
-const submission = (id: string, slot: number): Submission => ({
+const submission = (id: string, slot: number, scoring_type: "technical" | "performance" = "technical"): Submission => ({
   id: crypto.randomUUID(),
   user_id: `judge${slot}`,
   competitor_id: id,
   slot,
+  scoring_type,
   events: [event("T 3D")],
   performance: [5, 5, 5, 5, 5, 5],
   finished: true,
@@ -92,12 +93,16 @@ test("division normalization, complete scores, missing scores, and DQ", () => {
     competitor("5", "Exhibition"),
   ];
   comps[3].dq = true;
-  const subs = [1, 2, 3, 4, 5].flatMap((slot) => [
-    submission("1", slot),
-    submission("2", slot),
-    submission("3", slot),
-    submission("4", slot),
-  ]);
+  const groups = ["technical", "technical", "technical", "performance", "performance"] as const;
+  const subs = groups.flatMap((scoringType, index) => {
+    const slot = index + 1;
+    return [
+      submission("1", slot, scoringType),
+      submission("2", slot, scoringType),
+      submission("3", slot, scoringType),
+      submission("4", slot, scoringType),
+    ];
+  });
   subs.find((s) => s.competitor_id === "2" && s.slot === 5)!.finished = false;
   const results = rankGlobal(comps, subs, DEFAULT_SCORING_RULES);
   assert.equal(results.find((r) => r.competitor.id === "1")!.final, 100);
@@ -144,8 +149,9 @@ test("variable judge groups average within Technical and Performance before 70/3
   assert.equal(rankGlobal(competitors, rows, DEFAULT_SCORING_RULES, assignments).find((result) => result.competitor.id === "1")!.complete, false);
 });
 test("zero and negative raw values cannot create NaN or negative final scores", () => {
-  const subs = [1, 2, 3, 4, 5].map((s) => submission("1", s));
-  subs.forEach((s) => (s.events = [event("Time Violation")]));
+  const groups = ["technical", "technical", "technical", "performance", "performance"] as const;
+  const subs = groups.map((scoringType, index) => submission("1", index + 1, scoringType));
+  subs.forEach((s) => { if (s.scoring_type === "technical") s.events = [event("Time Violation")]; });
   const r = rankGlobal([competitor("1")], subs, DEFAULT_SCORING_RULES)[0];
   assert.equal(r.scaled, 0);
   assert.equal(r.final, 30);
@@ -160,13 +166,15 @@ test("editing a base value recalculates saved events, totals, and completed rank
   const second = submission("2", 1);
   second.events = [event("T 2D")];
   const competitors = [competitor("1"), competitor("2")];
-  const submissions = [1, 2, 3, 4, 5].flatMap((slot) => {
-    const a = submission("1", slot);
-    a.events = slot <= 3 ? [event("T 1D")] : [];
-    if (slot > 3) a.performance = [5, 5, 5, 5, 5, 5];
-    const b = submission("2", slot);
-    b.events = slot <= 3 ? [event("T 2D")] : [];
-    if (slot > 3) b.performance = [5, 5, 5, 5, 5, 5];
+  const groups = ["technical", "technical", "technical", "performance", "performance"] as const;
+  const submissions = groups.flatMap((scoringType, index) => {
+    const slot = index + 1;
+    const a = submission("1", slot, scoringType);
+    a.events = scoringType === "technical" ? [event("T 1D")] : [];
+    if (scoringType === "performance") a.performance = [5, 5, 5, 5, 5, 5];
+    const b = submission("2", slot, scoringType);
+    b.events = scoringType === "technical" ? [event("T 2D")] : [];
+    if (scoringType === "performance") b.performance = [5, 5, 5, 5, 5, 5];
     return [a, b];
   });
   const savedSelections = structuredClone(submissions.map((saved) => saved.events));
@@ -186,11 +194,13 @@ test("changing execution configuration recalculates historical event values, tot
   newRules.executions["E-2"] = 0.5;
   const competitorOne = competitor("1");
   const competitorTwo = competitor("2");
-  const submissions = [1, 2, 3, 4, 5].flatMap((slot) => [competitorOne, competitorTwo].map((target, index) => {
-    const saved = submission(target.id, slot);
-    saved.events = slot <= 3 ? [event("T 2D", 2, [], "E-2")] : [];
-    if (slot > 3) saved.performance = [5, 5, 5, 5, 5, 5];
-    if (index === 1 && slot <= 3) saved.events = [event("T 2D", 2, [], "E0")];
+  const groups = ["technical", "technical", "technical", "performance", "performance"] as const;
+  const submissions = groups.flatMap((scoringType, index) => [competitorOne, competitorTwo].map((target, competitorIndex) => {
+    const slot = index + 1;
+    const saved = submission(target.id, slot, scoringType);
+    saved.events = scoringType === "technical" ? [event("T 2D", 2, [], "E-2")] : [];
+    if (scoringType === "performance") saved.performance = [5, 5, 5, 5, 5, 5];
+    if (competitorIndex === 1 && scoringType === "technical") saved.events = [event("T 2D", 2, [], "E0")];
     return saved;
   }));
   const beforeEvents = structuredClone(submissions.map((saved) => saved.events));
@@ -213,9 +223,10 @@ test("impact summary includes affected submissions and every finalized ranking i
   const nextRules = structuredClone(rules);
   nextRules.bases.T["1D"] = 3;
   const competitors = [competitor("1"), competitor("2")];
-  const submissions = [1, 2, 3, 4, 5].flatMap((slot) => ["1", "2"].map((id) => {
-    const saved = submission(id, slot);
-    saved.events = slot <= 3 ? [event(id === "1" ? "T 1D" : "T 2D")] : [];
+  const groups = ["technical", "technical", "technical", "performance", "performance"] as const;
+  const submissions = groups.flatMap((scoringType, index) => ["1", "2"].map((id) => {
+    const saved = submission(id, index + 1, scoringType);
+    saved.events = scoringType === "technical" ? [event(id === "1" ? "T 1D" : "T 2D")] : [];
     return saved;
   }));
   const impact = calculateScoringConfigurationImpact(rules, nextRules, submissions, competitors);
