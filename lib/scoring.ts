@@ -7,7 +7,8 @@ export function eventScore(e: Event, rules: ScoringRules) {
   const base = rules.bases[type]?.[dimension];
   const level = rules.levels[String(e.level)];
   if (base === undefined || level === undefined) return 0;
-  return base * level * e.features.reduce((value, feature) => value * (rules.features[feature] ?? 1), 1);
+  const execution = rules.executions?.[e.execution ?? "E0"] ?? 1;
+  return base * level * e.features.reduce((value, feature) => value * (rules.features[feature] ?? 1), 1) * execution;
 }
 export function total(s: Submission, rules: ScoringRules) {
   return s.dq
@@ -36,7 +37,9 @@ export function rankGlobal(
               scoring_type: submission.scoring_type ?? (submission.slot <= 3 ? "technical" : "performance"),
             }])).values()];
       const slots = divisionAssignments.map((assignment) => submissions.find(
-        (s) => s.competitor_id === c.id && s.user_id === assignment.user_id && s.finished,
+        (s) => s.competitor_id === c.id && s.user_id === assignment.user_id &&
+          (s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) ===
+            (assignment.scoring_type ?? (assignment.slot <= 3 ? "technical" : "performance")) && s.finished,
       ));
       const values = slots.map((s) => (s ? total(s, rules) : null));
       const technicalIndexes = divisionAssignments.flatMap((assignment, index) =>

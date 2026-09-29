@@ -61,22 +61,7 @@ export async function GET(req: Request) {
     const ownProfile = await withAvatar(client, profile);
     let assignmentsQuery = client.from("division_judges").select("division,slot,user_id,scoring_type");
     if (!fullAccess) assignmentsQuery = assignmentsQuery.eq("user_id", profile.id);
-    let assignmentRows = await assignmentsQuery;
-    if (["42703", "PGRST204"].includes(assignmentRows.error?.code ?? "")) {
-      assignmentsQuery = client.from("division_judges").select("division,slot,user_id");
-      if (!fullAccess) assignmentsQuery = assignmentsQuery.eq("user_id", profile.id);
-      assignmentRows = await assignmentsQuery;
-    }
-    const assignmentsMissing = ["42P01", "PGRST205"].includes(assignmentRows.error?.code ?? "");
-    // Compatibility while an existing deployment is waiting for migration 006.
-    if (assignmentsMissing) {
-      assignmentRows = {
-        data: [...new Set(allCompetitors!.map((c: any) => c.division))].map((division) =>
-          ({ division, slot: profile.slot, user_id: profile.id, scoring_type: profile.slot! <= 3 ? "technical" : "performance" })),
-        error: null,
-      } as any;
-      if (fullAccess) assignmentRows.data = [];
-    }
+    const assignmentRows = await assignmentsQuery;
     if (assignmentRows.error) throw assignmentRows.error;
     const assignments = assignmentRows.data ?? [];
     const assignedDivisionIds = new Set(assignments.filter((a: any) => a.user_id === profile.id).map((a: any) => a.division));
@@ -135,25 +120,18 @@ export async function GET(req: Request) {
       result.competitors = allCompetitors;
       let roster: any = await client
         .from("profiles")
-        .select("id,name,username,role,slot,active,is_admin,avatar_path")
-        .order("slot");
-      // Keep the app usable against deployments until migration 005 is applied.
+        .select("id,name,username,role,active,is_admin,archived,avatar_path")
+        .order("name");
+      // Read the former global slot only from an older database during migration rollout.
       if (roster.error?.code === "42703")
-        roster = await client
-          .from("profiles")
-          .select("id,name,username,role,slot,active,is_admin")
-          .order("slot");
+        roster = await client.from("profiles")
+          .select("id,name,username,role,slot,active,is_admin,avatar_path")
+          .order("name");
       if (roster.error) throw roster.error;
       const profiles = roster.data;
       result.profiles = await Promise.all(
         (profiles ?? []).map((item: Record<string, any>) => withAvatar(client, item)),
       );
-      if (assignmentsMissing) {
-        const judges = (profiles ?? []).filter((p: any) => p.role === "judge" && p.active);
-        result.assignments = (divisionRows.data ?? []).flatMap((d: any) =>
-          judges.map((p: any) => ({ division: d.name, slot: p.slot, user_id: p.id, scoring_type: p.slot <= 3 ? "technical" : "performance" })),
-        );
-      }
     }
     return Response.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {

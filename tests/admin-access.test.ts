@@ -29,8 +29,7 @@ const alex: Profile = {
   id: crypto.randomUUID(),
   username: "alexandertai",
   name: "alexandertai",
-  role: "judge",
-  slot: 1,
+  role: "organizer",
   active: true,
   is_admin: true,
 };
@@ -38,13 +37,13 @@ const organizer: Profile = {
   ...alex,
   id: crypto.randomUUID(),
   username: "organizer",
-  role: "server_admin",
-  slot: null,
+  role: "organizer",
 };
 const judges = [2, 3, 4, 5].map((slot) => ({
   ...alex,
   id: crypto.randomUUID(),
   username: `judge${slot}`,
+  role: slot <= 3 ? "technical_judge" as const : "performance_judge" as const,
   slot,
   is_admin: false,
 }));
@@ -87,26 +86,28 @@ function route(name: string, profile: Profile, client: unknown) {
 const request = (body: unknown, url = "http://localhost/api/test") =>
   new Request(url, { method: "POST", body: JSON.stringify(body) });
 
-test("administrator identity and judge scoring remain independent, including legacy cache profiles", async () => {
+test("organizer accounts manage the event while division assignments grant scoring", async () => {
   for (const p of [alex, organizer]) {
     assert.equal(access.canManage(p), true);
     assert.equal(access.canEditJudge(p), false);
   }
   assert.equal(access.isAssignedJudge(alex), true);
-  assert.equal(alex.slot, 1);
-  assert.equal(access.isAssignedJudge(organizer), false);
+  assert.equal(access.isAssignedJudge(organizer), true);
+  assert.equal(access.profileCanScoreType(organizer, "technical"), true);
+  assert.equal(access.profileCanScoreType(organizer, "performance"), true);
+  assert.equal(access.profileCanScoreType({ ...judges[0], role: "technical_judge" }, "performance"), false);
   const serverJudge: Profile = {
     ...alex,
     role: "server_admin",
     is_admin: false,
   };
   assert.equal(access.canManage(serverJudge), true);
-  assert.equal(access.isAssignedJudge(serverJudge), false);
+  assert.equal(access.isAssignedJudge(serverJudge), true);
   for (const p of judges) {
     assert.equal(access.canManage(p), false);
     assert.equal(access.canEditJudge(p), true);
   }
-  assert.equal(access.canManage({ ...alex, is_admin: undefined }), false);
+  assert.equal(access.canManage({ ...alex, role: "technical_judge", is_admin: undefined }), false);
   assert.equal(access.canManage({ ...alex, active: false }), false);
 });
 
@@ -117,6 +118,7 @@ test("Admin score-view password is checked server-side for every signed-in accou
   process.env.SUPABASE_SERVICE_ROLE_KEY = "unit-test-signing-secret-0123456789abcdef";
   try {
     for (const profile of [...judges, alex, organizer]) {
+      const tables: string[] = [];
       const query: any = {
         select: () => query,
         eq: () => query,
@@ -125,14 +127,19 @@ test("Admin score-view password is checked server-side for every signed-in accou
         maybeSingle: async () => ({ data: null, error: null }),
       };
       const handlers = route("verify-admin", profile, {
-        from: () => query,
+        from: (table: string) => {
+          tables.push(table);
+          return query;
+        },
       });
       assert.equal(
         (await handlers.POST(request({ password: "wrong" }))).status,
         401,
       );
+      tables.length = 0;
       const authorized = await handlers.POST(request({ password: "ndladm" }));
       assert.equal(authorized.status, 200);
+      assert.deepEqual(tables, ["audit"], "Admin unlock does not query the competitor roster");
       const { unlockToken } = await authorized.json();
       assert.equal(hasValidAdminUnlock(unlockToken, profile.id), true);
       assert.equal(
@@ -172,6 +179,19 @@ test("Admin score-view password is checked server-side for every signed-in accou
       delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     else process.env.SUPABASE_SERVICE_ROLE_KEY = previousSigningSecret;
   }
+});
+
+test("Admin unlock authentication failures are explicit JSON 401 responses", async () => {
+  const handlers = load("app/api/verify-admin/route.ts", {
+    "@/lib/server": {
+      ...server,
+      identity: async () => { throw new Error("Sign in required"); },
+    },
+  });
+  const response = await handlers.POST(request({ password: "ndladm" }));
+  assert.equal(response.status, 401);
+  assert.match(response.headers.get("content-type") ?? "", /application\/json/);
+  assert.deepEqual(await response.json(), { error: "Sign in required" });
 });
 
 test("Admin unlock tokens are signed, profile-bound, and expire after the page-session window", () => {
@@ -268,7 +288,7 @@ test("division creation reports an existing division clearly instead of surfacin
   assert.equal(inserts, 0, "duplicate preflight must prevent an insert");
 });
 
-test("Judge 1 submits technical scores with unchanged attribution; backup organizer cannot score", async () => {
+test("sync leaves division authorization to the server-side assignment check", async () => {
   const calls: any[] = [];
   const client = {
     rpc: async (...args: any[]) => {
@@ -310,11 +330,15 @@ test("Judge 1 submits technical scores with unchanged attribution; backup organi
   assert.equal(calls[0][1].p_user, alex.id);
   assert.equal(calls[0][1].p_slot, 1);
   assert.equal(calls[0][1].p_version, 7);
-  assert.equal(
-    (await route("sync", organizer, client).POST(request(body))).status,
-    400,
-  );
-  assert.equal(calls.length, 1);
+  assert.equal((await route("sync", organizer, client).POST(request(body))).status, 200);
+  assert.equal(calls.length, 2);
+  const reopenRequest = {
+    ...body,
+    kind: "finish",
+    payload: { finished: false },
+  };
+  assert.equal((await route("sync", alex, client).POST(request(reopenRequest))).status, 400);
+  assert.equal(calls.length, 2, "judge sync cannot reopen a submitted score");
 });
 
 test("both administrators can activate, lock, review and create divisions", async () => {
@@ -374,13 +398,15 @@ test("both administrators can activate, lock, review and create divisions", asyn
   }
 });
 
-test("normal account management cannot edit, deactivate, reassign or demote either administrator", async () => {
-  for (const target of [alex, organizer]) {
+test("alexandertai remains protected from account role or identity changes", async () => {
+  for (const target of [alex]) {
     const builder: any = {
-      select: () => builder,
-      eq: () => builder,
+      selected: "",
+      filter: "",
+      select: (columns: string) => { builder.selected = columns; return builder; },
+      eq: (column: string) => { builder.filter = column; return builder; },
       neq: () => builder,
-      maybeSingle: async () => ({ data: null }),
+      maybeSingle: async () => ({ data: builder.filter === "id" ? target : null }),
       single: async () => ({ data: target }),
     };
     const client = {
@@ -400,9 +426,8 @@ test("normal account management cannot edit, deactivate, reassign or demote eith
         data: {
           id: target.id,
           username: "renamed",
-          slot: 5,
-          active: false,
-          is_admin: false,
+          name: "Renamed account",
+          role: "technical_judge",
           password: "123456",
         },
       }),
@@ -410,7 +435,7 @@ test("normal account management cannot edit, deactivate, reassign or demote eith
     assert.equal(response.status, 400);
     assert.match(
       (await response.json()).error,
-      /Administrator accounts are protected/,
+      /alexandertai must remain the protected full-access Organizer/,
     );
   }
 });
@@ -437,11 +462,13 @@ test("state endpoint masks score data until unlock and only returns own judge po
   const profiles = [alex, ...judges, organizer];
   const liveRules = structuredClone(DEFAULT_SCORING_RULES);
   liveRules.bases.T["3D"] = 9;
-  const submissions = [alex, ...judges].map((p) => ({
+  const scoringProfiles = [alex, ...judges];
+  const submissions = scoringProfiles.map((p, index) => ({
     id: crypto.randomUUID(),
     competitor_id: competitor.id,
     user_id: p.id,
-    slot: p.slot,
+    slot: index + 1,
+    scoring_type: p.role === "performance_judge" ? "performance" : "technical",
     events: [
       {
         id: crypto.randomUUID(),
@@ -476,10 +503,13 @@ test("state endpoint masks score data until unlock and only returns own judge po
             : table === "submissions"
               ? [...submissions]
               : table === "division_judges"
-                ? profiles.filter((row) => row.role === "judge").flatMap((row) => [
-                    { division: "Individual Open", slot: row.slot, user_id: row.id },
-                    { division: "Team Division", slot: row.slot, user_id: row.id },
-                  ])
+                ? scoringProfiles.flatMap((row, index) => {
+                    const scoring_type = row.role === "performance_judge" ? "performance" : "technical";
+                    return [
+                      { division: "Individual Open", slot: index + 1, user_id: row.id, scoring_type },
+                      { division: "Team Division", slot: index + 1, user_id: row.id, scoring_type },
+                    ];
+                  })
               : table === "profiles"
                 ? profiles.map((row) => ({
                     ...row,
@@ -527,12 +557,12 @@ test("state endpoint masks score data until unlock and only returns own judge po
     const hiddenBody = await response.json();
     assert.equal(hiddenBody.pointAccess, false);
     for (const submission of hiddenBody.submissions) {
-      const ownPerformance = p.role === "judge" && submission.user_id === p.id && (submission.scoring_type ?? (submission.slot > 3 ? "performance" : "technical")) === "performance";
+      const ownPerformance = p.role === "performance_judge" && submission.user_id === p.id && submission.scoring_type === "performance";
       assert.equal(submission.total, ownPerformance ? 30 : undefined);
       assert.deepEqual(submission.performance, ownPerformance ? [5, 5, 5, 5, 5, 5] : []);
       assert.equal(submission.events[0].value, undefined);
     }
-    if (p.role === "judge" && (p.slot ?? 0) > 3 && !access.isAdministrator(p)) {
+    if (p.role === "performance_judge" && !access.isAdministrator(p)) {
       assert.equal(hiddenBody.personal[0].total, 30);
     }
     if (access.isAdministrator(p)) {
@@ -571,12 +601,12 @@ test("state endpoint masks score data until unlock and only returns own judge po
     assert.equal(unlocked.status, 200);
     const visibleBody = await unlocked.json();
     assert.equal(visibleBody.pointAccess, true);
-    for (const saved of visibleBody.submissions.filter((row: any) => row.slot <= 3)) {
+    for (const saved of visibleBody.submissions.filter((row: any) => row.scoring_type === "technical")) {
       assert.equal(saved.total, 9);
       assert.equal(saved.events[0].value, 9);
     }
     const ownExport = personalScoreExportRows(p, visibleBody.submissions, [competitor], true);
-    if (p.slot !== null && p.slot <= 3 && ownExport.length > 0) {
+    if (p.role === "technical_judge" && ownExport.length > 0) {
       const technicalExport = ownExport[0];
       assert.ok("Events" in technicalExport);
       assert.equal(technicalExport.Total, 9);
@@ -591,7 +621,7 @@ test("state endpoint masks score data until unlock and only returns own judge po
     } else {
       assert.equal(visibleBody.submissions.length, 1);
       assert.equal(visibleBody.submissions[0].user_id, p.id);
-      assert.equal(visibleBody.submissions[0].total, p.slot! <= 3 ? 9 : 30);
+      assert.equal(visibleBody.submissions[0].total, p.role === "technical_judge" ? 9 : 30);
       assert.equal(visibleBody.submissions[0].events[0].value, 9);
       assert.equal(visibleBody.rankings, undefined);
       assert.equal(visibleBody.audit, undefined);
@@ -861,7 +891,7 @@ test("a performance judge can see and export only their own performance values w
     id: crypto.randomUUID(), name: "One", division: "Individual Open", position: 1,
     status: "locked" as const, archived: false, dq: false,
   };
-  const judge = judges[0];
+  const judge = judges[2];
   const ownPerformance: Submission = {
     id: crypto.randomUUID(), competitor_id: competitor.id, user_id: judge.id,
     slot: judge.slot!, scoring_type: "performance", events: [],
@@ -880,66 +910,91 @@ test("a performance judge can see and export only their own performance values w
   assert.equal((personal[0] as Record<string, unknown>).Control, 5);
 });
 
-test("admin judge creates six-character-password judges and edits ordinary accounts without granting admin", async () => {
-  for (const existing of [false, true]) {
+test("organizers can create each supported account role without numbered slots", async () => {
+  for (const role of ["technical_judge", "performance_judge", "organizer"] as const) {
     const writes: any[] = [];
-    const target = judges[1];
+    const targetId = crypto.randomUUID();
     const client = {
-      auth: {
-        admin: {
-          createUser: async (data: any) => {
-            assert.equal(data.password, "123456");
-            return { data: { user: { id: target.id } } };
-          },
-          updateUserById: async (id: string) => {
-            assert.equal(id, target.id);
-            return {};
-          },
-        },
-      },
+      auth: { admin: { createUser: async (input: any) => {
+        assert.equal(input.password, "123456");
+        return { data: { user: { id: targetId } } };
+      } } },
       from(table: string) {
-        let updating = false;
+        let inserted: any;
         const builder: any = {
           select: () => builder,
           eq: () => builder,
           neq: () => builder,
           maybeSingle: async () => ({ data: null }),
-          single: async () => ({ data: updating ? { id: target.id } : target }),
-          then: (done: (v: unknown) => unknown) =>
-            Promise.resolve({ data: [] }).then(done),
-          update: (data: unknown) => {
-            updating = true;
+          single: async () => ({ data: { id: targetId, role } }),
+          insert: async (data: unknown) => {
+            inserted = data;
             writes.push([table, data]);
             return builder;
           },
-          insert: async (data: unknown) => {
-            writes.push([table, data]);
-            return {};
-          },
+          then: (done: (value: unknown) => unknown) => Promise.resolve({ error: null, data: inserted }).then(done),
         };
         return builder;
       },
     };
-    const response = await route("manage", alex, client).POST(
-      request({
-        action: "user",
-        data: {
-          ...(existing ? { id: target.id } : {}),
-          username: "testjudge",
-          slot: 3,
-          active: !existing,
-          password: "123456",
-          is_admin: true,
-          role: "server_admin",
-        },
-      }),
-    );
+    const response = await route("manage", alex, client).POST(request({
+      action: "user",
+      data: { name: "New Judge", username: `new_${role}`, role, password: "123456" },
+    }));
     assert.equal(response.status, 200, JSON.stringify(await response.json()));
     const values = writes.find(([table]) => table === "profiles")[1];
-    assert.equal(values.role, "judge");
-    assert.notEqual(values.is_admin, true);
-    assert.equal(values.active, !existing);
+    assert.equal(values.role, role);
+    assert.equal(values.slot, undefined);
+    assert.equal(values.is_admin, role === "organizer");
   }
+});
+
+test("account removal deletes unused Auth accounts but archives scored accounts", async () => {
+  for (const outcome of [
+    { hard_delete: true, archived: false, score_history: false },
+    { hard_delete: false, archived: true, score_history: true },
+  ]) {
+    let authDeletions = 0;
+    let calledRpc = false;
+    const targetId = crypto.randomUUID();
+    const client = {
+      from: (table: string) => {
+        const builder: any = {
+          select: () => builder,
+          eq: () => builder,
+          maybeSingle: async () => ({
+            data: table === "profiles"
+              ? { id: targetId, username: "formerjudge", name: "Former Judge", role: "technical_judge", active: true, avatar_path: null }
+              : null,
+            error: null,
+          }),
+        };
+        return builder;
+      },
+      rpc: async (name: string, args: Record<string, string>) => {
+        assert.equal(name, "remove_judge_account");
+        assert.equal(args.p_actor, alex.id);
+        assert.equal(args.p_target, targetId);
+        calledRpc = true;
+        return { data: outcome, error: null };
+      },
+      auth: { admin: { deleteUser: async (id: string) => {
+        assert.equal(id, targetId);
+        authDeletions += 1;
+        return { error: null };
+      } } },
+    };
+    const response = await route("manage", alex, client).POST(request({ action: "remove_user", data: { id: targetId } }));
+    assert.equal(response.status, 200);
+    assert.equal(calledRpc, true);
+    assert.equal(authDeletions, outcome.hard_delete ? 1 : 0);
+    assert.equal((await response.json()).archived, outcome.archived);
+  }
+
+  const noDatabaseAccess = { from: () => { throw new Error("Organizer authorization should fail first"); } };
+  const denied = await route("manage", judges[0], noDatabaseAccess).POST(request({ action: "remove_user", data: { id: crypto.randomUUID() } }));
+  assert.equal(denied.status, 400);
+  assert.match((await denied.json()).error, /Organizer access required/);
 });
 
 test("administrator snapshot is sanitized for offline storage without losing Judge 1 pending work", async () => {
@@ -999,7 +1054,7 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
   assert.equal(cached.snapshot.personal![0].total, undefined);
   assert.deepEqual(cached.queue, workspace.queue);
   assert.equal(cached.snapshot.profile.id, alex.id);
-  assert.equal(cached.snapshot.profile.slot, 1);
+  assert.equal(cached.snapshot.profile.slot, undefined);
   assert.equal(cached.snapshot.profile.avatar_url, undefined);
   assert.equal(workspace.snapshot.submissions[0].total, 6);
   assert.equal(

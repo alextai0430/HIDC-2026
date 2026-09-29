@@ -1,7 +1,7 @@
 import { isAssignedJudge } from "@/lib/access";
 import { z } from "zod";
 import { identity, failure } from "@/lib/server";
-import { tricks, deductions } from "@/lib/model";
+import { executionOptions, tricks, deductions } from "@/lib/model";
 import { loadScoringConfiguration } from "@/lib/scoring-config";
 const op = z.object({
   id: z.string().uuid(),
@@ -24,6 +24,7 @@ export async function POST(req: Request) {
           trick: z.string(),
           level: z.union([z.literal(0.5), z.number().int().min(1).max(10)]),
           features: z.array(z.enum(["T1", "T2", "T3", "A"])).max(4),
+          execution: z.enum(executionOptions).default("E0"),
           at: z.string().datetime(),
         })
         .parse(input.payload);
@@ -32,6 +33,8 @@ export async function POST(req: Request) {
       const [type, dimension] = e.trick.split(" ");
       if (!deductions.includes(e.trick) && !tricks[type]?.includes(dimension))
         throw new Error("Invalid trick");
+      if (deductions.includes(e.trick) && e.execution !== "E0")
+        throw new Error("Execution adjustments cannot be applied to deductions");
       payload = e;
     } else if (input.kind === "delete_event") {
       payload = z.object({ id: z.string().uuid() }).parse(input.payload);
@@ -42,11 +45,12 @@ export async function POST(req: Request) {
         })
         .parse(input.payload);
     } else if (input.kind === "finish")
-      payload = z.object({ finished: z.boolean() }).parse(input.payload);
+      payload = z.object({ finished: z.literal(true) }).parse(input.payload);
     else payload = z.object({ dq: z.boolean() }).parse(input.payload);
     const { data, error } = await client.rpc("apply_score", {
       p_user: profile.id,
-      p_slot: profile.slot,
+      // Legacy RPC argument; the server resolves assignment order from this competitor's division.
+      p_slot: 1,
       p_id: input.id,
       p_competitor: input.competitor_id,
       p_version: input.expected_version,

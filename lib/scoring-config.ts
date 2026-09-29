@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { tricks } from "./model";
-import type { Competitor, ScoringConfiguration, ScoringRules, Submission } from "./model";
+import type { Competitor, Execution, ScoringConfiguration, ScoringRules, Submission } from "./model";
 import { eventScore } from "./scoring";
 
 // Server routes and tests only. Do not import point values into client code.
@@ -34,7 +34,10 @@ export const DEFAULT_SCORING_RULES: ScoringRules = {
     "10": 10,
   },
   features: { T1: 1.7, T2: 3, T3: 5, A: 1.7 },
+  executions: { E0: 1, "E-1": 0.9, "E-2": 0.8, "E-3": 0.7 },
 };
+
+const defaultExecutions: Record<Execution, number> = DEFAULT_SCORING_RULES.executions;
 
 const nonnegative = z.number().finite().min(0).max(1000);
 const positiveMultiplier = z.number().finite().min(0.01).max(100);
@@ -71,6 +74,14 @@ export const scoringRulesSchema = z.object({
     T3: positiveMultiplier,
     A: positiveMultiplier,
   }).strict(),
+  // Defaults let existing revisions/config rows (created before execution
+  // scoring existed) continue to load as E0 / Normal.
+  executions: z.object({
+    E0: positiveMultiplier,
+    "E-1": positiveMultiplier,
+    "E-2": positiveMultiplier,
+    "E-3": positiveMultiplier,
+  }).strict().default(defaultExecutions),
 }).strict();
 
 export function validateScoringRules(value: unknown): ScoringRules {
@@ -92,11 +103,13 @@ export async function loadScoringConfiguration(client: any): Promise<ScoringConf
   }
   if (error) throw new Error(error.message ?? "Could not load technical point rules.");
   if (!data) throw new Error("Global technical point configuration is missing.");
+  const storageReady = !!data.rules && typeof data.rules === "object" &&
+    !!(data.rules as Record<string, unknown>).executions;
   return {
     revision: Number(data.revision),
     dataRevision: Number(data.data_revision ?? 1),
     rules: validateScoringRules(data.rules),
-    storageReady: true,
+    storageReady,
   };
 }
 

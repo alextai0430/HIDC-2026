@@ -179,7 +179,7 @@ function authorizationFailure(req: Request, profile: Profile) {
 
 function migrationRequired() {
   return Response.json(
-    { error: "Apply Supabase migration 007 before using Technical Point Configuration." },
+    { error: "Apply Supabase migration 20260928213559_execution_scoring_workflow.sql before using Technical Point Configuration." },
     { status: 503, headers: { "Cache-Control": "no-store" } },
   );
 }

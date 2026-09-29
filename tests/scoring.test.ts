@@ -4,14 +4,18 @@ import { eventScore, rankGlobal, total } from "../lib/scoring";
 import {
   calculateScoringConfigurationImpact,
   DEFAULT_SCORING_RULES,
+  validateScoringRules,
 } from "../lib/scoring-config";
+import { executionOptions } from "../lib/model";
+import { matchHotkeyAction, stepTechnicalLevel, technicalLevels } from "../lib/technical-controls";
 import { applyLocal } from "../lib/local";
 import { Competitor, Event, Submission, Snapshot } from "../lib/model";
-const event = (trick: string, level = 1, features: string[] = []): Event => ({
+const event = (trick: string, level = 1, features: string[] = [], execution?: Event["execution"]): Event => ({
   id: crypto.randomUUID(),
   trick,
   level,
   features,
+  ...(execution ? { execution } : {}),
   at: new Date().toISOString(),
 });
 const competitor = (id: string, division = "Individual Open"): Competitor => ({
@@ -41,6 +45,43 @@ test("technical bases and compounded features, without extra multipliers", () =>
   assert.equal(eventScore(event("W VD", 0.5), DEFAULT_SCORING_RULES), 0.2);
   assert.equal(eventScore(event("Unintentional Drop", 10, ["T3"]), DEFAULT_SCORING_RULES), -0.3);
   assert.equal(eventScore(event("Other Rule Violation"), DEFAULT_SCORING_RULES), -2);
+});
+test("execution choices multiply completed trick scores and never alter fixed deductions", () => {
+  const base = event("T 2D", 2);
+  assert.equal(eventScore({ ...base, execution: "E0" }, DEFAULT_SCORING_RULES), 2);
+  assert.equal(eventScore({ ...base, execution: "E-1" }, DEFAULT_SCORING_RULES), 1.8);
+  assert.equal(eventScore({ ...base, execution: "E-2" }, DEFAULT_SCORING_RULES), 1.6);
+  assert.equal(eventScore({ ...base, execution: "E-3" }, DEFAULT_SCORING_RULES), 1.4);
+  assert.equal(eventScore(event("T 2D", 2, ["T1"], "E-3"), DEFAULT_SCORING_RULES), 2 * 1.7 * 0.7);
+  assert.equal(eventScore(event("Unintentional Drop", 10, ["T3"], "E-3"), DEFAULT_SCORING_RULES), -0.3);
+  assert.equal(eventScore(event("T 2D", 2), DEFAULT_SCORING_RULES), 2, "legacy events without execution remain normal E0");
+  assert.deepEqual(executionOptions, ["E0", "E-1", "E-2", "E-3"], "no positive execution option is available");
+  const legacyRules = structuredClone(DEFAULT_SCORING_RULES) as any;
+  delete legacyRules.executions;
+  assert.deepEqual(validateScoringRules(legacyRules).executions, DEFAULT_SCORING_RULES.executions);
+  assert.throws(() => validateScoringRules({ ...DEFAULT_SCORING_RULES, executions: { ...DEFAULT_SCORING_RULES.executions, "E+1": 1.1 } }));
+});
+test("level step controls follow direct-button order and clamp at L0.5 and L10", () => {
+  assert.deepEqual(technicalLevels.map((level) => stepTechnicalLevel(level, 1)), [...technicalLevels.slice(1), 10]);
+  assert.deepEqual(technicalLevels.map((level) => stepTechnicalLevel(level, -1)), [0.5, ...technicalLevels.slice(0, -1)]);
+  assert.equal(stepTechnicalLevel(0.5, -1), 0.5);
+  assert.equal(stepTechnicalLevel(10, 1), 10);
+});
+test("level and execution actions resolve through user-configured hotkeys", () => {
+  const hotkeys = {
+    "level:next": "u",
+    "level:previous": "j",
+    "level:2": "q",
+    "execution:E0": "n0",
+    "execution:E-1": "n1",
+    "execution:E-2": "n2",
+    "execution:E-3": "n3",
+  };
+  assert.equal(matchHotkeyAction(hotkeys, "u", "u"), "level:next");
+  assert.equal(matchHotkeyAction(hotkeys, "j", "j"), "level:previous");
+  assert.equal(matchHotkeyAction(hotkeys, "q", "q"), "level:2", "direct level shortcuts remain available");
+  assert.equal(matchHotkeyAction(hotkeys, "n2", "2"), "execution:E-2");
+  assert.equal(matchHotkeyAction(hotkeys, "n3", "3"), "execution:E-3");
 });
 test("division normalization, complete scores, missing scores, and DQ", () => {
   const comps = [
@@ -138,6 +179,34 @@ test("editing a base value recalculates saved events, totals, and completed rank
   assert.equal(after[0].competitor.id, "1");
   assert.equal(total(submissions[0], changedRules), 3);
   assert.deepEqual(submissions.map((saved) => saved.events), savedSelections);
+});
+test("changing execution configuration recalculates historical event values, totals, rankings, and impact", () => {
+  const oldRules = structuredClone(DEFAULT_SCORING_RULES);
+  const newRules = structuredClone(oldRules);
+  newRules.executions["E-2"] = 0.5;
+  const competitorOne = competitor("1");
+  const competitorTwo = competitor("2");
+  const submissions = [1, 2, 3, 4, 5].flatMap((slot) => [competitorOne, competitorTwo].map((target, index) => {
+    const saved = submission(target.id, slot);
+    saved.events = slot <= 3 ? [event("T 2D", 2, [], "E-2")] : [];
+    if (slot > 3) saved.performance = [5, 5, 5, 5, 5, 5];
+    if (index === 1 && slot <= 3) saved.events = [event("T 2D", 2, [], "E0")];
+    return saved;
+  }));
+  const beforeEvents = structuredClone(submissions.map((saved) => saved.events));
+  assert.equal(eventScore(submissions[0].events[0], oldRules), 1.6);
+  assert.equal(eventScore(submissions[0].events[0], newRules), 1);
+  const beforeRankings = rankGlobal([competitorOne, competitorTwo], submissions, oldRules);
+  const afterRankings = rankGlobal([competitorOne, competitorTwo], submissions, newRules);
+  assert.notEqual(beforeRankings.find((row) => row.competitor.id === "1")?.final, afterRankings.find((row) => row.competitor.id === "1")?.final);
+  assert.deepEqual(submissions.map((saved) => saved.events), beforeEvents, "recalculation preserves event choices and timestamps");
+  assert.deepEqual(calculateScoringConfigurationImpact(oldRules, newRules, submissions, [competitorOne, competitorTwo]), {
+    technicalSubmissions: 3,
+    technicalEventValues: 3,
+    competitors: 2,
+    rankingDivisions: 1,
+    finalizedRankings: 2,
+  });
 });
 test("impact summary includes affected submissions and every finalized ranking in the division", () => {
   const rules = structuredClone(DEFAULT_SCORING_RULES);

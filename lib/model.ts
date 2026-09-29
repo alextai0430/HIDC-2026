@@ -38,12 +38,22 @@ export const deductions = [
   "Time Violation",
   "Other Rule Violation",
 ];
+export const executionOptions = ["E0", "E-1", "E-2", "E-3"] as const;
+export type Execution = (typeof executionOptions)[number];
+export const executionLabels: Record<Execution, string> = {
+  E0: "E0 / Normal",
+  "E-1": "E−1 / 10% reduction",
+  "E-2": "E−2 / 20% reduction",
+  "E-3": "E−3 / 30% reduction",
+};
 export type Profile = {
   id: string;
   name: string;
-  role: "judge" | "server_admin";
-  slot: number | null;
+  role: "technical_judge" | "performance_judge" | "organizer" | "judge" | "server_admin";
+  // Kept only to read pre-migration offline snapshots; never used as an account assignment.
+  slot?: number | null;
   active: boolean;
+  archived?: boolean;
   username?: string;
   // Time-limited URL generated from a private storage object by /api/state.
   avatar_url?: string | null;
@@ -67,6 +77,8 @@ export type Event = {
   trick: string;
   level: number;
   features: string[];
+  // Missing on legacy saved events; the scorer treats those as E0 / Normal.
+  execution?: Execution;
   at: string;
   value?: number;
 };
@@ -75,6 +87,7 @@ export type ScoringRules = {
   deductions: Record<string, number>;
   levels: Record<string, number>;
   features: Record<string, number>;
+  executions: Record<Execution, number>;
 };
 export type ScoringConfiguration = {
   revision: number;
@@ -87,8 +100,8 @@ export type Submission = {
   competitor_id: string;
   user_id: string;
   slot: number;
-  // The score type is assigned per division and may differ from the judge's
-  // legacy profile slot. Missing values on old offline snapshots fall back to slot.
+  // Scoring group is snapshotted at submission creation to preserve history.
+  // Missing values on old offline snapshots fall back to the legacy internal order.
   scoring_type?: "technical" | "performance";
   events: Event[];
   performance: number[];

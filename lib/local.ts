@@ -71,12 +71,16 @@ export function applyLocal(snapshot: Snapshot, op: Operation): Snapshot {
       s.competitor_id === op.competitor_id && s.user_id === state.profile.id,
   );
   if (!s) {
+    const assignment = state.assignments?.find((row) =>
+      row.division === state.competitors.find((competitor) => competitor.id === op.competitor_id)?.division &&
+      row.user_id === state.profile.id,
+    );
     s = {
       id: crypto.randomUUID(),
       competitor_id: op.competitor_id,
       user_id: state.profile.id,
-      slot: state.profile.slot!,
-      scoring_type: state.assignments?.find((assignment) => assignment.division === state.competitors.find((competitor) => competitor.id === op.competitor_id)?.division && assignment.user_id === state.profile.id)?.scoring_type ?? (state.profile.slot! <= 3 ? "technical" : "performance"),
+      slot: assignment?.slot ?? state.profile.slot ?? 1,
+      scoring_type: assignment?.scoring_type ?? (state.profile.role === "performance_judge" ? "performance" : state.profile.role === "judge" && (state.profile.slot ?? 1) > 3 ? "performance" : "technical"),
       events: [],
       performance: [0, 0, 0, 0, 0, 0],
       finished: false,
@@ -96,10 +100,26 @@ export function applyLocal(snapshot: Snapshot, op: Operation): Snapshot {
   if (op.kind === "delete_event")
     s.events = s.events.filter((e) => e.id !== p.id);
   if (op.kind === "performance") s.performance = p.values as number[];
-  if (op.kind === "finish") s.finished = p.finished as boolean;
+  if (op.kind === "finish") {
+    s.finished = p.finished as boolean;
+    if (s.finished) s.submitted_at ??= new Date().toISOString();
+  }
   if (op.kind === "dq") s.dq = p.dq as boolean;
   s.version++;
   s.updated_at = new Date().toISOString();
   delete s.total;
   return state;
+}
+
+/** Apply only this workspace's queued score actions over a fresh server snapshot. */
+export function mergeRemoteSnapshotPreservingQueue(
+  current: LocalWorkspace,
+  remote: Snapshot,
+): LocalWorkspace {
+  if (current.snapshot.profile.id !== remote.profile.id) return current;
+  const snapshot = current.queue.reduce(
+    (merged, operation) => applyLocal(merged, operation),
+    structuredClone(remote),
+  );
+  return { ...current, snapshot, queue: [...current.queue] };
 }

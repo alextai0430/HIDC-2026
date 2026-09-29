@@ -31,21 +31,23 @@ import {
 } from "lucide-react";
 import {
   canManage,
-  canEditJudge,
   isAssignedJudge,
-  isAdministrator,
   canManageScoringConfiguration,
+  profileCanScoreType,
+  scoringTabs,
 } from "@/lib/access";
-import { api, demo, supabase } from "@/lib/supabase";
+import { api, ApiResponseError, demo, supabase } from "@/lib/supabase";
 import { PasswordField } from "@/app/components/password-field";
 import { profilePasswordError } from "@/lib/password-validation";
-import { applyLocal, clearLocal, LocalWorkspace, readLocal, sanitizeWorkspace, writeLocal } from "@/lib/local";
+import { applyLocal, clearLocal, LocalWorkspace, mergeRemoteSnapshotPreservingQueue, readLocal, sanitizeWorkspace, writeLocal } from "@/lib/local";
 import {
   categories,
   Competitor,
   deductions,
   demoCompetitors,
   divisions,
+  executionLabels,
+  executionOptions,
   Event,
   Operation,
   Profile,
@@ -53,6 +55,7 @@ import {
   Submission,
   tricks,
 } from "@/lib/model";
+import { matchHotkeyAction, stepTechnicalLevel, technicalLevels } from "@/lib/technical-controls";
 import { download } from "@/lib/export";
 import TechnicalPointConfiguration from "@/app/components/technical-point-configuration";
 import AppearanceSettings, { type AppearanceSaveResult } from "@/app/components/appearance-settings";
@@ -70,6 +73,12 @@ const defaultKeys: Record<string, string> = {
   clear: "Escape",
   undo: "Backspace",
   finish: "Shift+Enter",
+  "level:next": "]",
+  "level:previous": "[",
+  "execution:E0": "e0",
+  "execution:E-1": "e1",
+  "execution:E-2": "e2",
+  "execution:E-3": "e3",
   "tab:Saved Competitors": "Alt+s",
   "tab:Rankings": "Alt+r",
   ...Object.fromEntries(
@@ -81,7 +90,7 @@ const defaultKeys: Record<string, string> = {
     ),
   ),
   ...Object.fromEntries(
-    [0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => [
+    technicalLevels.map((n) => [
       `level:${n}`,
       n === 10 ? "0" : n === 0.5 ? "`" : `${n}`,
     ]),
@@ -97,24 +106,82 @@ const defaultKeys: Record<string, string> = {
 };
 const fmt = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
 const uid = () => crypto.randomUUID();
+const executionControlLabels: Record<(typeof executionOptions)[number], string> = {
+  E0: "E0",
+  "E-1": "E−1",
+  "E-2": "E−2",
+  "E-3": "E−3",
+};
+
+function SubmissionEventDetail({
+  event,
+  index,
+  revealPoints,
+}: {
+  event: Event;
+  index: number;
+  revealPoints: boolean;
+}) {
+  const deduction = deductions.includes(event.trick);
+  const category = deduction ? "deduction" : event.trick.split(" ")[0];
+  return (
+    <div
+      className={`detail-event ${deduction ? "deduction" : ""}`}
+      data-category={category}
+    >
+      <div className="detail-event-main">
+        <b className="detail-event-title">
+          <span className="detail-event-index">{index + 1}.</span> {event.trick}
+        </b>
+        <span className="detail-event-meta">
+          {deduction
+            ? "Deduction"
+            : `L${event.level} · ${event.features.join(" + ") || "No features"} · ${executionLabels[event.execution ?? "E0"]}`}
+        </span>
+      </div>
+      <b className="detail-event-points">
+        {revealPoints && event.value !== undefined
+          ? `${fmt(event.value)} points`
+          : "*** points"}
+      </b>
+      <time className="detail-event-time">{new Date(event.at).toLocaleString()}</time>
+    </div>
+  );
+}
+
+const hotkeyActionLabel = (action: string) => {
+  if (action === "level:next") return "Level + (next)";
+  if (action === "level:previous") return "Level − (previous)";
+  if (action.startsWith("execution:")) {
+    const executionKey = action.slice("execution:".length) as (typeof executionOptions)[number];
+    return `Execution ${executionControlLabels[executionKey] ?? executionKey}`;
+  }
+  if (action === "finish") return "Submit score";
+  if (action.startsWith("level:")) return `Level ${action.slice("level:".length)}`;
+  if (action.startsWith("tab:")) return `Go to ${action.slice("tab:".length)}`;
+  return action;
+};
 type ScoringType = "technical" | "performance";
 type JudgeAssignment = { division: string; slot: number; user_id: string; scoring_type?: ScoringType };
-const profileScoringType = (profile?: Profile | null): ScoringType => (profile?.slot ?? 1) <= 3 ? "technical" : "performance";
+const profileScoringType = (profile?: Profile | null): ScoringType => profile?.role === "performance_judge" || profile?.role === "judge" && (profile.slot ?? 1) > 3 ? "performance" : "technical";
 const assignmentScoringType = (assignment?: JudgeAssignment, profile?: Profile): ScoringType =>
   assignment?.scoring_type ?? (assignment ? (assignment.slot <= 3 ? "technical" : "performance") : profileScoringType(profile));
+const roleLabel = (role: Profile["role"]) => role === "technical_judge" ? "Technical Judge" : role === "performance_judge" ? "Performance Judge" : "Organizer";
+const profileRoleLabel = (profile: Profile, scoringType?: ScoringType) => profile.role === "judge"
+  ? `${scoringType === "performance" ? "Performance" : "Technical"} Judge`
+  : roleLabel(profile.role);
 function defaultScoreTab(snapshot: Snapshot) {
   if (canManage(snapshot.profile)) return "Server Access Control";
   const active = snapshot.competitors.find((competitor) => competitor.status === "active" && !competitor.archived);
   const assignment = active && snapshot.assignments?.find((row) => row.division === active.division && row.user_id === snapshot.profile.id);
   return assignmentScoringType(assignment, snapshot.profile) === "performance" ? "Performance" : "Technical";
 }
-const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
-  const sampleJudges = [1, 2, 3, 4, 5].map((judgeSlot): Profile => ({
-    id: `demo-user-${judgeSlot}`,
-    name: `Demo Judge ${judgeSlot}`,
-    username: `demo-judge-${judgeSlot}`,
-    role: "judge",
-    slot: judgeSlot,
+const blankDemo = (role: Profile["role"] = "technical_judge"): Snapshot => {
+  const sampleJudges = [1, 2, 3, 4, 5].map((order): Profile => ({
+    id: `demo-user-${order}`,
+    name: ["Taylor Chen", "Morgan Lee", "Riley Shah", "Jordan Kim", "Casey Wu"][order - 1],
+    username: ["taylorchen", "morganlee", "rileyshah", "jordankim", "caseywu"][order - 1],
+    role: order <= 3 ? "technical_judge" : "performance_judge",
     active: true,
   }));
   const demoRoster: Competitor[] = demoCompetitors.map((competitor, index) => ({
@@ -126,11 +193,11 @@ const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
   const activeSample = demoRoster[1];
   const sampleSubmissions = [
     ...sampleJudges.map((judge) => ({
-      id: `demo-sub-${finishedSample.id}-${judge.slot}`,
+      id: `demo-sub-${finishedSample.id}-${judge.id}`,
       competitor_id: finishedSample.id,
       user_id: judge.id,
-      slot: judge.slot!,
-      scoring_type: judge.slot! <= 3 ? "technical" as const : "performance" as const,
+      slot: sampleJudges.indexOf(judge) + 1,
+      scoring_type: profileScoringType(judge),
       events: [],
       performance: [3, 3, 3, 3, 3, 3],
       finished: true,
@@ -155,18 +222,17 @@ const blankDemo = (slot = 1, role: Profile["role"] = "judge"): Snapshot => {
   ];
   return {
     profile: {
-      id: `demo-user-${role === "server_admin" ? "organizer" : slot}`,
-      name: role === "server_admin" ? "Event organizer" : `Demo Judge ${slot}`,
+      id: `demo-user-${role === "organizer" || role === "server_admin" ? "organizer" : role === "performance_judge" ? 4 : 1}`,
+      name: role === "organizer" || role === "server_admin" ? "Event organizer" : sampleJudges[role === "performance_judge" ? 3 : 0].name,
       role,
-      slot: role === "judge" ? slot : null,
       active: true,
     },
     competitors: demoRoster,
     submissions: sampleSubmissions,
-    protected: role === "server_admin",
+    protected: role === "organizer" || role === "server_admin",
     profiles: sampleJudges,
     assignments: allDemoDivisions.map((division) =>
-      sampleJudges.map((judge) => ({ division, slot: judge.slot!, user_id: judge.id, scoring_type: judge.slot! <= 3 ? "technical" as const : "performance" as const })),
+      sampleJudges.map((judge, index) => ({ division, slot: index + 1, user_id: judge.id, scoring_type: profileScoringType(judge) })),
     ).flat(),
     audit: [],
     rankings: [],
@@ -184,6 +250,8 @@ export default function Page() {
   const [ready, setReady] = useState(false),
     [online, setOnline] = useState(true),
     [syncing, setSyncing] = useState(false),
+    [refreshQueued, setRefreshQueued] = useState(false),
+    [refreshingCompetitor, setRefreshingCompetitor] = useState(false),
     [syncError, setSyncError] = useState(""),
     [scoringReconciliationNotice, setScoringReconciliationNotice] = useState(""),
     [notice, setNotice] = useState(""),
@@ -208,8 +276,10 @@ export default function Page() {
   const appearanceSyncBusy = useRef(false);
   const [newDivision, setNewDivision] = useState("");
   const [divisionFormOpen, setDivisionFormOpen] = useState(false);
+  const [submittingCompetitors, setSubmittingCompetitors] = useState<Set<string>>(() => new Set());
   const [trick, setTrick] = useState(""),
     [level, setLevel] = useState(1),
+    [execution, setExecution] = useState<(typeof executionOptions)[number]>("E0"),
     [features, setFeatures] = useState<string[]>([]),
     [editing, setEditing] = useState<Event | null>(null),
     [hotkeys, setHotkeys] = useState(defaultKeys),
@@ -241,12 +311,14 @@ export default function Page() {
     ),
     [userEdit, setUserEdit] = useState<
       (Partial<Profile> & { username?: string; password?: string }) | null
-    >(null);
+    >(null),
+    [accountDeleteTarget, setAccountDeleteTarget] = useState<Profile | null>(null),
+    [accountDeleteConfirmation, setAccountDeleteConfirmation] = useState("");
   const state = workspace?.snapshot;
   const profile = state?.profile;
   const server = !!profile && canManage(profile);
   const canManageScoringConfig = !!profile && canManageScoringConfiguration(profile);
-  const organizer = profile?.role === "server_admin";
+  const organizer = profile?.role === "organizer" || profile?.role === "server_admin";
   const canViewPoints =
     adminUnlocked && showPoints && !!adminUnlockToken && state?.pointAccess === true;
   const canViewSubmissionPoints = (submission?: Submission) =>
@@ -286,6 +358,8 @@ export default function Page() {
     profile && state ? detailSubmissions(profile, state.submissions) : [];
   const personalSubmissions =
     profile && state ? ownSubmissions(profile, state.submissions) : [];
+  const submissionPending = !!current && submittingCompetitors.has(current.id) && displayed?.user_id === profile?.id;
+  const submissionSubmitted = !!displayed?.finished || submissionPending;
   const canScore =
     !!profile &&
     isAssignedJudge(profile) &&
@@ -293,7 +367,8 @@ export default function Page() {
     assignmentScoringType(currentAssignment, profile) === (tab === "Performance" ? "performance" : "technical") &&
     !!current &&
     !current.archived &&
-    (current.status === "active" || !!own);
+    current.status === "active" &&
+    !submissionSubmitted;
   const allDivisions = Array.from(
     new Set([
       ...divisions,
@@ -314,7 +389,7 @@ export default function Page() {
     (a) => a.division === assignmentDivision,
   );
   const divisionProfiles = (state?.profiles ?? []).filter(
-    (p) => p.active && p.role === "judge",
+    (p) => p.active && !p.archived,
   );
   const currentAssignmentDraft: Record<string, { user_id: string; scoring_type: ScoringType }> = Object.fromEntries(
     divisionAssignments.map((a) => [String(a.slot), {
@@ -341,21 +416,23 @@ export default function Page() {
         .sort((a, b) => a.slot - b.slot);
       const entries = judges.map((judge) => {
         const judgeProfile = state?.profiles?.find((p) => p.id === judge.user_id);
+        const scoringType = assignmentScoringType(judge, judgeProfile);
         const submission = state?.submissions.find(
-          (s) => s.competitor_id === competitor.id && s.user_id === judge.user_id,
+          (s) => s.competitor_id === competitor.id && s.user_id === judge.user_id &&
+            (s.scoring_type ?? (s.slot > 3 ? "performance" : "technical")) === scoringType,
         );
         return {
           ...judge,
-          name: judgeProfile?.name ?? `Judge ${judge.slot}`,
-          scoring_type: assignmentScoringType(judge, judgeProfile),
+          name: judgeProfile?.name ?? "Former judge",
+          scoring_type: scoringType,
           status: submission?.finished
-            ? "Finished"
+            ? "Submitted"
             : submission && submission.version > 0
               ? "In progress"
               : "Not started",
         };
       });
-      const complete = entries.length >= 2 && entries.some((entry) => entry.scoring_type === "technical") && entries.some((entry) => entry.scoring_type === "performance") && entries.every((entry) => entry.status === "Finished");
+      const complete = entries.length >= 2 && entries.some((entry) => entry.scoring_type === "technical") && entries.some((entry) => entry.scoring_type === "performance") && entries.every((entry) => entry.status === "Submitted");
       const started = entries.some((entry) => entry.status !== "Not started");
       return {
         competitor,
@@ -369,6 +446,10 @@ export default function Page() {
     entries.length >= 2 && entries.length <= 10 &&
     entries.some((entry) => entry.scoring_type === "technical") &&
     entries.some((entry) => entry.scoring_type === "performance");
+  const accountHasScoreHistory = (accountId: string) =>
+    (state?.submissions ?? []).some((submission) => submission.user_id === accountId && (
+      submission.version > 0 || submission.finished || submission.dq || submission.events.length > 0 || submission.performance.some((value) => value !== 0)
+    )) || (state?.audit ?? []).some((row) => row.user_id === accountId && ["put_event", "delete_event", "performance", "finish", "dq"].includes(String(row.action)));
   const previewAppearance = useCallback((preferences: AppearancePreferences) => {
     const effective = preferences.mode === "system"
       ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
@@ -417,7 +498,7 @@ export default function Page() {
       }
     }
     const viewer = next.snapshot.profile;
-    if (viewer.role === "judge" && !canManage(viewer)) {
+    if (!canManage(viewer)) {
       const ownSubmissions = next.snapshot.submissions.filter((submission) => submission.user_id === viewer.id);
       const ownCompetitorIds = new Set(ownSubmissions.map((submission) => submission.competitor_id));
       const allowedActiveDivisions = new Set((next.snapshot.assignments ?? [])
@@ -516,19 +597,46 @@ export default function Page() {
     [adminUnlocked, adminUnlockToken, showPoints],
   );
   const refresh = useCallback(async () => {
-    if (demo || busy.current || ref.current?.queue.length || !navigator.onLine)
+    if (demo || !navigator.onLine) return;
+    // Keep sync and refresh serialized, but do not skip live state just because
+    // this judge has score events queued locally.
+    if (busy.current) {
+      setRefreshQueued(true);
       return;
+    }
+    setRefreshQueued(false);
     busy.current = true;
+    setRefreshingCompetitor(true);
     try {
       const snapshot: Snapshot = await fetchState();
       chain.current = chain.current.then(async () => {
-        if (!ref.current?.queue.length) await commit({ snapshot, queue: [] });
+        const current = ref.current;
+        if (!current || current.snapshot.profile.id !== snapshot.profile.id) return;
+        const reopenedSubmission = current.snapshot.submissions.find(
+          (previous) => previous.user_id === current.snapshot.profile.id && previous.finished &&
+            !current.queue.some((operation) => operation.competitor_id === previous.competitor_id) &&
+            snapshot.submissions.some((next) => next.id === previous.id && !next.finished),
+        );
+        const merged = mergeRemoteSnapshotPreservingQueue(current, snapshot);
+        await commit(merged);
+        if (reopenedSubmission) {
+          setNotice("The organizer reopened your score. Editing is available.");
+        }
+        if (!merged.queue.length) setSyncError("");
       });
       await chain.current;
     } catch (e) {
-      setSyncError((e as Error).message);
+      const error = e as Error;
+      setSyncError(
+        error instanceof ApiResponseError && error.status === 401
+          ? "Sign-in required. Your saved session was rejected; sign in again to reconnect."
+          : !navigator.onLine || error instanceof TypeError
+            ? "Connection lost. Any pending scores remain saved locally."
+            : error.message,
+      );
     } finally {
       busy.current = false;
+      setRefreshingCompetitor(false);
     }
   }, [commit, fetchState]);
   const sync = useCallback(async () => {
@@ -676,12 +784,28 @@ export default function Page() {
   }, [adminUnlocked, showPoints, state?.pointAccess]);
   useEffect(() => {
     if (!ready || !state) return;
+    const revalidate = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine) return;
+      // Stop periodic retries when the auth session is rejected. The visible
+      // Retry action can still make one explicit check.
+      if (syncError.startsWith("Sign-in required.")) return;
+      if (ref.current?.queue.length) {
+        // Drain queued work first where possible, then merge a fresh snapshot
+        // underneath any actions that still remain queued.
+        void sync().then(() => refresh());
+      } else {
+        void refresh();
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") revalidate();
+    };
+    const onOnline = () => revalidate();
     const timer = setInterval(() => {
-      void sync();
-      void refresh();
+      revalidate();
       void syncAppearance();
-    }, 5000);
-    void sync();
+    }, 10000);
+    revalidate();
     void syncAppearance();
     const channel =
       !demo && supabase
@@ -695,15 +819,28 @@ export default function Page() {
             .on(
               "postgres_changes",
               { event: "UPDATE", schema: "public", table: "live_signal" },
-              () => void refresh(),
+              revalidate,
             )
-            .subscribe()
+            .subscribe((status) => {
+              if (status === "SUBSCRIBED") revalidate();
+            })
         : null;
+    window.addEventListener("focus", revalidate);
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       clearInterval(timer);
+      window.removeEventListener("focus", revalidate);
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       if (channel) void supabase?.removeChannel(channel);
     };
-  }, [ready, state?.profile.id, online, sync, refresh, syncAppearance]);
+  }, [ready, state?.profile.id, online, sync, refresh, syncAppearance, syncError]);
+  useEffect(() => {
+    if (refreshQueued && !syncing && !refreshingCompetitor && online) {
+      void refresh();
+    }
+  }, [refreshQueued, syncing, refreshingCompetitor, online, refresh]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 3500);
@@ -715,6 +852,10 @@ export default function Page() {
   ) => {
     if (!canScore || !current) return;
     const competitorId = current.id;
+    const submitting = kind === "finish" && payload.finished === true;
+    if (submitting) {
+      setSubmittingCompetitors((previous) => new Set(previous).add(competitorId));
+    }
     chain.current = chain.current.then(async () => {
       try {
         const latest = ref.current!;
@@ -723,6 +864,12 @@ export default function Page() {
             s.competitor_id === competitorId &&
             s.user_id === latest.snapshot.profile.id,
         );
+        if (s?.finished) {
+          throw new Error("This score has been submitted. Ask an organizer to reopen it.");
+        }
+        if (kind === "finish" && payload.finished !== true) {
+          throw new Error("Submitted scores can only be reopened by an organizer.");
+        }
         if (kind === "performance" && typeof payload.index === "number") {
           const values = [...(s?.performance ?? [0, 0, 0, 0, 0, 0])];
           values[payload.index] = Number(payload.value);
@@ -742,13 +889,21 @@ export default function Page() {
           kind === "put_event"
             ? "Event recorded · saved on this laptop"
             : kind === "finish"
-              ? "Submission finished · saved on this laptop"
+              ? "Submitted · saved on this laptop"
               : "Change saved on this laptop",
         );
       } catch (e) {
         setSyncError(
           `Local save failed: ${(e as Error).message}. Do not close this page.`,
         );
+      } finally {
+        if (submitting) {
+          setSubmittingCompetitors((previous) => {
+            const next = new Set(previous);
+            next.delete(competitorId);
+            return next;
+          });
+        }
       }
       void sync();
     });
@@ -756,12 +911,14 @@ export default function Page() {
   useEffect(() => {
     setTrick("");
     setLevel(1);
+    setExecution("E0");
     setFeatures([]);
     setEditing(null);
   }, [active?.id]);
   const clear = () => {
     setTrick("");
     setLevel(1);
+    setExecution("E0");
     setFeatures([]);
     setEditing(null);
   };
@@ -773,6 +930,7 @@ export default function Page() {
       trick,
       level,
       features: deductions.includes(trick) ? [] : features,
+      ...(!deductions.includes(trick) ? { execution } : {}),
       at: editing?.at ?? new Date().toISOString(),
     });
     clear();
@@ -783,12 +941,15 @@ export default function Page() {
       body: `${event.trick} will be removed from the sequence. Its history remains in the audit log.`,
       action: () => persistAction("delete_event", { id: event.id }),
     });
-  const finish = () =>
+  const finish = () => {
+    if (!canScore) return;
     setModal({
-      title: "Finish This Submission?",
-      body: "Your work is saved on this laptop. You can reopen your own entry later for corrections. Pending changes still need to sync.",
+      title: "Submit Score?",
+      body: "Submit your score for this competitor? You will not be able to make further edits unless an organizer reopens it.",
       action: () => persistAction("finish", { finished: true }),
+      confirmLabel: "Submit",
     });
+  };
   const toggleFeature = (f: string) =>
     setFeatures((prev) =>
       prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f],
@@ -816,9 +977,7 @@ export default function Page() {
       if (e.altKey) key = `Alt+${key}`;
       if (e.ctrlKey || e.metaKey) return;
       const combined = Date.now() - last < 900 ? prefix + key : key;
-      let action = Object.keys(hotkeys).find((a) => hotkeys[a] === combined);
-      if (!action)
-        action = Object.keys(hotkeys).find((a) => hotkeys[a] === key);
+      const action = matchHotkeyAction(hotkeys, combined, key);
       prefix = key;
       last = Date.now();
       if (!action) return;
@@ -829,8 +988,15 @@ export default function Page() {
       else if (action === "finish") finish();
       else if (action === "undo" && own?.events.length)
         remove(own.events[own.events.length - 1]);
+      else if (action === "level:next") setLevel((current) => stepTechnicalLevel(current, 1));
+      else if (action === "level:previous") setLevel((current) => stepTechnicalLevel(current, -1));
       else if (action.startsWith("level:"))
         setLevel(Number(action.split(":")[1]));
+      else if (action.startsWith("execution:")) {
+        const nextExecution = action.slice("execution:".length);
+        if (executionOptions.includes(nextExecution as (typeof executionOptions)[number]))
+          setExecution(nextExecution as (typeof executionOptions)[number]);
+      }
       else if (action.startsWith("tab:")) setTab(action.slice(4));
       else if (["T1", "T2", "T3", "A"].includes(action)) toggleFeature(action);
       else setTrick(action);
@@ -1074,8 +1240,12 @@ export default function Page() {
   }
   async function verifyAdminPassword(e: React.FormEvent) {
     e.preventDefault();
-    setAdminPasswordBusy(true);
     setAdminPasswordError("");
+    if (!navigator.onLine) {
+      setAdminPasswordError("Admin unlock requires connection. Reconnect and try again.");
+      return;
+    }
+    setAdminPasswordBusy(true);
     try {
       const result = await api("verify-admin", { password: adminPassword });
       if (!result.unlockToken)
@@ -1084,8 +1254,16 @@ export default function Page() {
       setAdminUnlocked(true);
       setShowPoints(false);
       setAdminPassword("");
+      setSyncError("");
     } catch (e) {
-      setAdminPasswordError((e as Error).message);
+      const error = e as Error;
+      setAdminPasswordError(
+        !navigator.onLine || error instanceof TypeError
+          ? "Admin unlock requires connection. Reconnect and try again."
+          : error instanceof ApiResponseError && error.status === 401 && error.message === "Sign in required"
+            ? "Your sign-in session is no longer valid. Sign in again to unlock Admin."
+            : error.message,
+      );
     } finally {
       setAdminPasswordBusy(false);
     }
@@ -1106,15 +1284,23 @@ export default function Page() {
       const snapshot: Snapshot = await api("state", undefined, {
         adminUnlockToken,
       });
-      if (!snapshot.pointAccess)
+      if (!snapshot.pointAccess) {
+        setAdminUnlocked(false);
+        setAdminUnlockToken(null);
         throw new Error("Admin access expired. Enter the Admin password again.");
+      }
       await commit({ snapshot, queue: ref.current?.queue ?? [] });
       setShowPoints(true);
     } catch (error) {
-      setAdminUnlocked(false);
-      setAdminUnlockToken(null);
       setShowPoints(false);
-      setAdminPasswordError((error as Error).message);
+      const failure = error as Error;
+      setAdminPasswordError(
+        !navigator.onLine || failure instanceof TypeError
+          ? "Admin unlock requires connection. Reconnect and try again."
+          : failure instanceof ApiResponseError && failure.status === 401 && failure.message === "Sign in required"
+            ? "Your sign-in session is no longer valid. Sign in again to view points."
+            : failure.message,
+      );
     }
   }
   function lockAdmin() {
@@ -1179,18 +1365,24 @@ export default function Page() {
             ...(next.snapshot.assignments ?? []).filter((row) => row.division !== assignment.division),
             ...assignment.assignments.map((row) => ({ ...row, division: assignment.division })),
           ];
-        } else if (action === "user")
+        } else if (["user", "remove_user", "reactivate_user"].includes(action))
           throw new Error(
             "Account changes require a connected Supabase project.",
           );
         await commit(next);
       } else {
-        await api("manage", { action, data });
+        const result = await api("manage", { action, data });
+        if (action === "remove_user") {
+          setNotice((result as { archived?: boolean })?.archived ? "Account archived; score history was preserved." : "Account deleted.");
+        } else if (action === "reactivate_user") setNotice("Account reactivated. Assign it to divisions as needed.");
+        else setNotice(action === "user" ? "Account saved." : action === "assignments" ? "Division assignments saved." : action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
         await refresh();
       }
       setCompetitorEdit(null);
       setUserEdit(null);
-      setNotice(action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
+      if (demo) setNotice(action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
+      setAccountDeleteTarget(null);
+      setAccountDeleteConfirmation("");
       return true;
     } catch (e) {
       setSyncError((e as Error).message);
@@ -1211,9 +1403,8 @@ export default function Page() {
     }
   }
   async function switchDemo(value: string) {
-    const role = value === "organizer" ? "server_admin" : "judge";
-    const slot = role === "judge" ? Number(value) : 1;
-    const snapshot = blankDemo(slot, role);
+    const role = value as Profile["role"];
+    const snapshot = blankDemo(role);
     const local = await readLocal(snapshot.profile.id);
     await commit(local ?? { snapshot, queue: [] });
     localStorage.setItem("hidc-demo-user", snapshot.profile.id);
@@ -1319,13 +1510,7 @@ export default function Page() {
     );
   const nav = [
     ...(server ? ["Server Access Control"] : []),
-    ...(server
-      ? ["Technical", "Performance"]
-      : profile?.role === "judge"
-        ? [...new Set((state?.assignments ?? [])
-            .filter((assignment) => assignment.user_id === profile.id && assignment.division === active?.division)
-            .map((assignment) => assignmentScoringType(assignment, profile) === "technical" ? "Technical" : "Performance"))]
-        : []),
+    ...(profile ? scoringTabs(profile) : []),
     "Score Details",
     "Saved Competitors",
     "Rankings",
@@ -1410,9 +1595,7 @@ export default function Page() {
           <div className="identity">
             <b>{profile?.name}</b>
             <span>
-              {organizer
-                ? "Server organizer"
-                : `${technical ? "Technical" : "Performance"} Judge ${profile?.slot}${profile && isAdministrator(profile) ? " · Administrator" : ""}`}
+              {profile ? profileRoleLabel(profile, assignmentScoringType(currentAssignment, profile)) : ""}
             </span>
           </div>
           <button
@@ -1476,15 +1659,12 @@ export default function Page() {
           </span>
           <select
             aria-label="Demo account"
-            value={organizer ? "organizer" : (profile?.slot ?? 1)}
+            value={profile?.role ?? "technical_judge"}
             onChange={(e) => void switchDemo(e.target.value)}
           >
-            {[1, 2, 3, 4, 5].map((n) => (
-              <option key={n} value={n}>
-                {n < 4 ? "Technical" : "Performance"} Judge {n}
-              </option>
-            ))}
-            <option value="organizer">Server organizer</option>
+            <option value="technical_judge">Technical Judge</option>
+            <option value="performance_judge">Performance Judge</option>
+            <option value="organizer">Organizer</option>
           </select>
         </div>
       )}
@@ -1497,7 +1677,8 @@ export default function Page() {
           <button
             onClick={() => {
               setSyncError("");
-              void sync();
+              if (workspace.queue.length) void sync().then(() => refresh());
+              else void refresh();
             }}
           >
             Retry Sync
@@ -1543,7 +1724,7 @@ export default function Page() {
           <div>
             <div className="eyebrow">
               COMPETITION WORKSPACE <span>/</span>{" "}
-              {organizer ? "ORGANIZER" : `JUDGE ${profile?.slot}`}
+              {profile ? profileRoleLabel(profile, assignmentScoringType(currentAssignment, profile)).toUpperCase() : ""}
             </div>
             <h1>
               {tab === "Technical"
@@ -1563,6 +1744,11 @@ export default function Page() {
                   <button onClick={() => openSettingsSection("hotkeys")}>
                     <Keyboard size={16} /> Hotkeys <kbd>?</kbd>
                   </button>
+                )}
+                {refreshingCompetitor && (
+                  <span className="live-refreshing" role="status" aria-live="polite">
+                    <Activity size={14} /> Checking live floor…
+                  </span>
                 )}
               </>
             )}
@@ -1594,8 +1780,8 @@ export default function Page() {
               <div className="routine-meta">
                 <span>YOUR SUBMISSION</span>
                 <b>
-                  {displayed?.finished
-                    ? "Finished"
+                  {submissionSubmitted
+                    ? "Submitted"
                     : own
                       ? "In progress"
                       : "Not started"}
@@ -1616,30 +1802,38 @@ export default function Page() {
                     >
                       {currentRoleAssignments.map((assignment) => (
                           <option value={assignment.user_id} key={assignment.user_id}>
-                            {state?.profiles?.find((candidate) => candidate.id === assignment.user_id)?.name ?? `Judge ${assignment.slot}`}
+                            {state?.profiles?.find((candidate) => candidate.id === assignment.user_id)?.name ?? "Former judge"}
                           </option>
                         ))}
                     </select>
                   </label>
                 )}
-                <button
-                  disabled={!canScore}
-                  onClick={() => {
-                    setNotice(
-                      "All changes are saved automatically on this laptop.",
-                    );
-                    void sync();
-                  }}
-                >
-                  <Save size={16} /> Save
-                </button>
-                <button
-                  className="primary"
-                  disabled={!canScore}
-                  onClick={finish}
-                >
-                  Finish Scoring <Check size={17} />
-                </button>
+                {submissionSubmitted ? (
+                  <span className="submission-locked-label" role="status" aria-live="polite">
+                    <Lock size={15} /> Submitted — Waiting for the next competitor
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      disabled={!canScore}
+                      onClick={() => {
+                        setNotice(
+                          "All changes are saved automatically on this laptop.",
+                        );
+                        void sync();
+                      }}
+                    >
+                      <Save size={16} /> Save
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={!canScore}
+                      onClick={finish}
+                    >
+                      Submit <Check size={17} />
+                    </button>
+                  </>
+                )}
                 <span className={`scoring-sync-state ${syncing ? "syncing" : syncError && workspace.queue.length ? "attention" : workspace.queue.length || demo ? "local" : "synced"}`} role="status" aria-live="polite">
                   {syncing ? <Activity size={15} /> : syncError && workspace.queue.length ? <CloudOff size={15} /> : workspace.queue.length || demo ? <Save size={15} /> : <CheckCircle2 size={15} />}
                   {syncStatus}
@@ -1651,6 +1845,24 @@ export default function Page() {
                 )}
               </div>
             </section>
+            {!active && (
+              <section className="panel scoring-empty-state" role="status" aria-live="polite">
+                <div>
+                  <h2>No competitor is currently available for scoring.</h2>
+                  {refreshingCompetitor && <p className="muted">Checking for the next competitor…</p>}
+                  {server ? (
+                    <p>Use Server Access Control to create a competitor or activate the next one.</p>
+                  ) : (
+                    <p>Scoring will become available when the organizer starts the next competitor.</p>
+                  )}
+                </div>
+                {server && (
+                  <button type="button" onClick={() => setTab("Server Access Control")}>
+                    Open Server Access Control <ArrowRight size={15} />
+                  </button>
+                )}
+              </section>
+            )}
             {tab === "Technical" ? (
               <div className="technical-layout">
                 <aside className="sequence panel">
@@ -1693,6 +1905,7 @@ export default function Page() {
                                 {event.features.length
                                   ? " · " + event.features.join(" · ")
                                   : ""}
+                                {" · " + executionControlLabels[event.execution ?? "E0"]}
                               </span>
                             )}
                             <small>
@@ -1717,6 +1930,7 @@ export default function Page() {
                               setTrick(event.trick);
                               setLevel(event.level);
                               setFeatures(event.features);
+                              setExecution(event.execution ?? "E0");
                             }}
                           >
                             <Pencil size={13} />
@@ -1739,7 +1953,17 @@ export default function Page() {
                     <b>{canViewPoints && displayed?.total !== undefined ? fmt(displayed.total) : "***"}</b>
                   </div>
                 </aside>
-                <div className="scoring-controls">
+                  <div className="scoring-controls">
+                  {submissionSubmitted ? (
+                    <section className="panel submission-locked-state" role="status" aria-live="polite">
+                      <Lock size={18} />
+                      <div>
+                        <strong>Submitted — Waiting for the next competitor</strong>
+                        <span>Your score is locked. An organizer can reopen it if a correction is needed.</span>
+                      </div>
+                    </section>
+                  ) : (
+                  <>
                   <section className="panel trick-panel">
                     <div className="panel-heading">
                       <h3>
@@ -1791,37 +2015,23 @@ export default function Page() {
                       ))}
                     </div>
                   </section>
-                  <section className="panel deductions">
-                    <div className="panel-heading">
-                      <h3>
-                        <Flag size={15} /> Major Deductions
-                      </h3>
-                      <span className="muted">Recorded as events</span>
-                    </div>
-                    <div className="deduction-buttons">
-                      {deductions.map((d) => (
-                        <button
-                          key={d}
-                          disabled={!canScore}
-                          aria-pressed={trick === d}
-                          className={trick === d ? "selected" : ""}
-                          onClick={() => setTrick(d)}
-                        >
-                          {d}
-                          <kbd>{keysEnabled ? hotkeys[d] : ""}</kbd>
-                        </button>
-                      ))}
-                    </div>
-                  </section>
                   <div className="modifiers">
                     <section className="panel">
-                      <div className="panel-heading">
+                      <div className="panel-heading level-panel-heading">
                         <h3>
                           02 <span>Level</span>
                         </h3>
+                        <div className="level-step-buttons">
+                          <button type="button" disabled={!canScore || deductions.includes(trick) || level === technicalLevels[0]} aria-label="Decrease level" title="Level −" onClick={() => setLevel((current) => stepTechnicalLevel(current, -1))}>
+                            Level − <kbd>{keysEnabled ? hotkeys["level:previous"] : ""}</kbd>
+                          </button>
+                          <button type="button" disabled={!canScore || deductions.includes(trick) || level === technicalLevels[technicalLevels.length - 1]} aria-label="Increase level" title="Level +" onClick={() => setLevel((current) => stepTechnicalLevel(current, 1))}>
+                            Level + <kbd>{keysEnabled ? hotkeys["level:next"] : ""}</kbd>
+                          </button>
+                        </div>
                       </div>
                       <div className="level-buttons">
-                        {[0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                        {technicalLevels.map((n) => (
                           <button
                             key={n}
                             disabled={!canScore || deductions.includes(trick)}
@@ -1855,7 +2065,49 @@ export default function Page() {
                         ))}
                       </div>
                     </section>
+                    <section className="panel execution-panel">
+                      <div className="panel-heading">
+                        <h3>04 <span>Execution</span></h3>
+                      </div>
+                      <div className="execution-buttons">
+                        {executionOptions.map((option) => (
+                          <button
+                            key={option}
+                            type="button"
+                            disabled={!canScore || deductions.includes(trick)}
+                            aria-pressed={execution === option}
+                            className={execution === option ? "selected" : ""}
+                            onClick={() => setExecution(option)}
+                          >
+                            <span>{executionControlLabels[option]}</span>
+                            <kbd>{keysEnabled ? hotkeys[`execution:${option}`] : ""}</kbd>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
                   </div>
+                  <section className="panel deductions">
+                    <div className="panel-heading">
+                      <h3>
+                        <Flag size={15} /> Major Deductions
+                      </h3>
+                      <span className="muted">Recorded as events</span>
+                    </div>
+                    <div className="deduction-buttons">
+                      {deductions.map((d) => (
+                        <button
+                          key={d}
+                          disabled={!canScore}
+                          aria-pressed={trick === d}
+                          className={trick === d ? "selected" : ""}
+                          onClick={() => setTrick(d)}
+                        >
+                          {d}
+                          <kbd>{keysEnabled ? hotkeys[d] : ""}</kbd>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
                   <div className="submit-bar">
                     <div>
                       <span className="eyebrow">
@@ -1870,11 +2122,12 @@ export default function Page() {
                             {features.length
                               ? " / " + features.join(" + ")
                               : ""}
+                            {" / " + executionControlLabels[execution]}
                           </small>
                         )}
                       </b>
                     </div>
-                    <button className="clear-button" onClick={clear}>
+                    <button className="clear-button" disabled={!canScore} onClick={clear}>
                       Clear <kbd>esc</kbd>
                     </button>
                     <button
@@ -1887,6 +2140,8 @@ export default function Page() {
                       <kbd>↵</kbd>
                     </button>
                   </div>
+                  </>
+                  )}
                   <div className="scoring-foot">
                     <span>
                       <CheckCircle2 size={14} />{" "}
@@ -1900,29 +2155,40 @@ export default function Page() {
                             ? "Syncing score…"
                             : "Score synced"}
                     </span>
-                    <button
-                      disabled={!canScore}
-                      className="danger-quiet"
-                      onClick={() =>
-                        setModal({
-                          title: displayed?.dq
-                            ? "Remove disqualification?"
-                            : "Disqualify this submission?",
-                          body: "This is a consequential scoring decision and will be recorded in the audit trail.",
-                          action: () =>
-                            persistAction("dq", { dq: !displayed?.dq }),
-                        })
-                      }
-                    >
-                      <Flag size={13} />
-                      {displayed?.dq ? "Undo disqualification" : "Disqualify"}
-                    </button>
+                    {!submissionSubmitted && (
+                      <button
+                        disabled={!canScore}
+                        className="danger-quiet"
+                        onClick={() =>
+                          setModal({
+                            title: displayed?.dq
+                              ? "Remove disqualification?"
+                              : "Disqualify this submission?",
+                            body: "This is a consequential scoring decision and will be recorded in the audit trail.",
+                            action: () =>
+                              persistAction("dq", { dq: !displayed?.dq }),
+                          })
+                        }
+                      >
+                        <Flag size={13} />
+                        {displayed?.dq ? "Undo disqualification" : "Disqualify"}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
             ) : (
               <div className="performance-layout">
                 <div className="panel category-panel">
+                  {submissionSubmitted && (
+                    <div className="submission-locked-state performance-locked-state" role="status" aria-live="polite">
+                      <Lock size={18} />
+                      <div>
+                        <strong>Submitted — Waiting for the next competitor</strong>
+                        <span>Your ratings are locked. An organizer can reopen them if a correction is needed.</span>
+                      </div>
+                    </div>
+                  )}
                   {categories.map((category, i) => (
                     <div className="category" key={category}>
                       <div>
@@ -1936,29 +2202,31 @@ export default function Page() {
                             : "***"}
                         </strong>
                       </div>
-                      <div className="rating-options">
-                        {Array.from({ length: 11 }, (_, n) => n * 0.5).map(
-                          (value) => (
-                            <button
-                              key={value}
-                              disabled={!canScore}
-                              className={
-                                (displayed?.performance[i] ?? 0) === value
-                                  ? "selected"
-                                  : ""
-                              }
-                              onClick={() => {
-                                persistAction("performance", {
-                                  index: i,
-                                  value,
-                                });
-                              }}
-                            >
-                              {value}
-                            </button>
-                          ),
-                        )}
-                      </div>
+                      {!submissionSubmitted && (
+                        <div className="rating-options">
+                          {Array.from({ length: 11 }, (_, n) => n * 0.5).map(
+                            (value) => (
+                              <button
+                                key={value}
+                                disabled={!canScore}
+                                className={
+                                  (displayed?.performance[i] ?? 0) === value
+                                    ? "selected"
+                                    : ""
+                                }
+                                onClick={() => {
+                                  persistAction("performance", {
+                                    index: i,
+                                    value,
+                                  });
+                                }}
+                              >
+                                {value}
+                              </button>
+                            ),
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2059,7 +2327,7 @@ export default function Page() {
                           </td>
                           <td>
                             {s?.finished
-                              ? "Finished"
+                              ? "Submitted"
                               : s
                                 ? "In progress"
                                 : "Not started"}
@@ -2161,7 +2429,7 @@ export default function Page() {
             {!state.personal?.length && (
               <div className="empty-state">
                 <Trophy />
-                <h3>No Finished Rankings Yet</h3>
+                <h3>No Submitted Rankings Yet</h3>
                 <p>
                   Finish and sync a submission to see your personal results.
                 </p>
@@ -2187,6 +2455,7 @@ export default function Page() {
                         ),
                         state.competitors,
                         canViewPoints,
+                        state.profiles ?? [],
                       ),
                       format,
                       "score-details",
@@ -2207,9 +2476,9 @@ export default function Page() {
                         ?.name
                     }
                   </span>
-                  <span>{s.scoring_type === "performance" || (s.scoring_type === undefined && s.slot > 3) ? "Performance" : "Technical"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? `Judge ${s.slot}`}</span>
+                  <span>{s.scoring_type === "performance" || (s.scoring_type === undefined && s.slot > 3) ? "Performance" : "Technical"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? (s.user_id === profile?.id ? profile.name : "Former judge")}</span>
                   <span>
-                    {s.finished ? "Finished" : "Draft"}
+                    {s.finished ? "Submitted" : "Draft"}
                     {s.dq ? " · DQ" : ""}
                     {canViewSubmissionPoints(s)
                       ? ` · Total ${s.total === undefined ? "***" : fmt(s.total)}`
@@ -2224,7 +2493,7 @@ export default function Page() {
                         setModal({
                           title: s.finished
                             ? "Reopen this submission?"
-                            : "Mark this submission finished?",
+                            : "Mark this submission submitted?",
                           body: "This change is recorded in the audit log.",
                           action: () => {
                             void api("review", {
@@ -2239,7 +2508,7 @@ export default function Page() {
                         })
                       }
                     >
-                      {s.finished ? "Reopen submission" : "Mark finished"}
+                      {s.finished ? "Reopen submission" : "Mark submitted"}
                     </button>
                     <button
                       disabled={demo}
@@ -2274,23 +2543,12 @@ export default function Page() {
                 </p>
                 {(s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) === "technical"
                   ? s.events.map((e, i) => (
-                      <div className="detail-event" key={e.id}>
-                        <b>
-                          {i + 1}. {e.trick}
-                        </b>
-                        <span>
-                          {deductions.includes(e.trick)
-                            ? "Deduction"
-                            : `L${e.level} · ${e.features.join(" + ") || "No features"}`}
-                        </span>
-                        <span>{canViewPoints && e.value !== undefined ? `${fmt(e.value)} points` : "*** points"}</span>
-                        <time>{new Date(e.at).toLocaleString()}</time>
-                      </div>
+                      <SubmissionEventDetail key={e.id} event={e} index={i} revealPoints={canViewPoints} />
                     ))
                   : categories.map((c, i) => (
-                      <div className="detail-event" key={c}>
-                        <span>{c}</span>
-                      <b>{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
+                      <div className="detail-event detail-event-category" key={c}>
+                        <b className="detail-event-title">{c}</b>
+                        <b className="detail-event-points">{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
                       </div>
                     ))}
               </details>
@@ -2431,24 +2689,19 @@ export default function Page() {
                     }
                   </span>
                   <span>
-                    {s.finished ? "Finished" : "Draft"}
+                    {s.finished ? "Submitted" : "Draft"}
                     {s.dq ? " · DQ" : ""}
                   </span>
                   <span>Total {canViewSubmissionPoints(s) && s.total !== undefined ? fmt(s.total) : "***"}</span>
                 </summary>
                 {(s.scoring_type ?? (s.slot <= 3 ? "technical" : "performance")) === "technical"
                   ? s.events.map((e, i) => (
-                      <div className="detail-event" key={e.id}>
-                        <span>
-                          {i + 1}. {e.trick}
-                        </span>
-                        <b>{canViewPoints && e.value !== undefined ? `${fmt(e.value)} points` : "*** points"}</b>
-                      </div>
+                      <SubmissionEventDetail key={e.id} event={e} index={i} revealPoints={canViewPoints} />
                     ))
                   : categories.map((c, i) => (
-                      <div className="detail-event" key={c}>
-                        <span>{c}</span>
-                        <b>{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
+                      <div className="detail-event detail-event-category" key={c}>
+                        <b className="detail-event-title">{c}</b>
+                        <b className="detail-event-points">{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
                       </div>
                     ))}
               </details>
@@ -2538,7 +2791,7 @@ export default function Page() {
                   </button>
                 </div>
               </div>
-              <p>Assign 2–10 active judges per division, with at least one Technical and one Performance judge. Judges may serve in multiple divisions; assignments lock after scoring starts.</p>
+              <p>Normally assign 3 Technical Judges and 2 Performance Judges. Each division has its own group; judges may serve in multiple divisions. Organizers count only when explicitly assigned.</p>
               {divisionFormOpen && (
                 <form className="division-add-form" onSubmit={addDivision}>
                   <label>
@@ -2566,10 +2819,14 @@ export default function Page() {
                   };
                   return (
                     <div className="assignment-judge-row" key={slot}>
-                      <b>Judge {slot}</b>
+                      <b>{scoring_type === "technical" ? "Technical Judge" : "Performance Judge"}</b>
                       <label>
                         Scoring group
-                        <select value={scoring_type} onChange={(event) => updateRow({ scoring_type: event.target.value as ScoringType })}>
+                        <select value={scoring_type} onChange={(event) => {
+                          const nextType = event.target.value as ScoringType;
+                          const assignedProfile = divisionProfiles.find((candidate) => candidate.id === user_id);
+                          updateRow({ scoring_type: nextType, user_id: assignedProfile && profileCanScoreType(assignedProfile, nextType) ? user_id : "" });
+                        }}>
                           <option value="technical">Technical</option>
                           <option value="performance">Performance</option>
                         </select>
@@ -2578,14 +2835,14 @@ export default function Page() {
                         Judge account
                         <select value={user_id} onChange={(event) => updateRow({ user_id: event.target.value })}>
                           <option value="">Select assigned judge</option>
-                          {divisionProfiles.map((p) => (
+                          {divisionProfiles.filter((p) => profileCanScoreType(p, scoring_type)).map((p) => (
                             <option key={p.id} value={p.id} disabled={usedElsewhere.has(p.id)}>
                               {p.name} · @{p.username}
                             </option>
                           ))}
                         </select>
                       </label>
-                      <button type="button" aria-label={`Remove Judge ${slot}`} title={`Remove Judge ${slot}`} onClick={() => {
+                      <button type="button" aria-label="Remove assignment" title="Remove assignment" onClick={() => {
                         const remaining = editableAssignmentRows.filter((row) => row.slot !== slot);
                         setAssignmentDraft(Object.fromEntries(remaining.map((row, index) => [String(index + 1), { user_id: row.user_id, scoring_type: row.scoring_type }])));
                       }}><Trash2 size={14} /> Remove</button>
@@ -2609,10 +2866,24 @@ export default function Page() {
                       !editableAssignmentRows.some((row) => row.scoring_type === "technical") ||
                       !editableAssignmentRows.some((row) => row.scoring_type === "performance")
                     }
-                    onClick={() => void manage("assignments", {
-                      division: assignmentDivision,
-                      assignments: editableAssignmentRows.map(({ slot, user_id, scoring_type }) => ({ slot, user_id, scoring_type })),
-                    })}
+                    onClick={() => {
+                      const assignments = editableAssignmentRows.map(({ slot, user_id, scoring_type }) => ({ slot, user_id, scoring_type }));
+                      const unchanged = JSON.stringify(assignments) === JSON.stringify(divisionAssignments.map(({ slot, user_id, scoring_type }) => ({ slot, user_id, scoring_type: assignmentScoringType({ division: assignmentDivision, slot, user_id, scoring_type }, state?.profiles?.find((p) => p.id === user_id)) })));
+                      if (unchanged) return;
+                      const divisionCompetitors = new Set(state?.competitors.filter((competitor) => competitor.division === assignmentDivision).map((competitor) => competitor.id));
+                      const scored = (state?.submissions ?? []).filter((submission) => divisionCompetitors.has(submission.competitor_id) && (submission.version > 0 || submission.finished || submission.dq || submission.events.length > 0 || submission.performance.some((value) => value !== 0)));
+                      const saveAssignments = () => void manage("assignments", { division: assignmentDivision, assignments });
+                      if (scored.length) {
+                        const affectedCompetitors = new Set(scored.map((submission) => submission.competitor_id)).size;
+                        setModal({
+                          title: "Change Division Judge Assignments?",
+                          body: `${scored.length} saved score submission${scored.length === 1 ? "" : "s"} across ${affectedCompetitors} competitor${affectedCompetitors === 1 ? "" : "s"} will be evaluated against the new assigned group. Historical scores remain attributed to their original judges, but completion and final rankings may change.`,
+                          action: saveAssignments,
+                          confirmLabel: "Confirm Assignment Change",
+                          danger: true,
+                        });
+                      } else saveAssignments();
+                    }}
                   >Save Judge Group</button>
                 </div>
               </div>
@@ -2620,7 +2891,7 @@ export default function Page() {
             <section className="panel records progress-overview">
               <div className="panel-heading">
                 <h3>Competitor Progress</h3>
-                <span className="muted">Green only when all assigned judges finish</span>
+                <span className="muted">Green only when all assigned judges submit</span>
               </div>
               <div className="progress-table-wrap">
                 <div className="progress-table-header" aria-hidden="true">
@@ -2640,7 +2911,7 @@ export default function Page() {
                           {validProgressAssignments(entries) ? entries.map((entry) => (
                             <span
                               key={entry.user_id}
-                              className={`judge-progress ${entry.status === "Finished" ? "finished" : entry.status === "In progress" ? "draft" : "not-started"}`}
+                              className={`judge-progress ${entry.status === "Submitted" ? "finished" : entry.status === "In progress" ? "draft" : "not-started"}`}
                               title={`${entry.scoring_type === "technical" ? "Technical" : "Performance"} · ${entry.name} · ${entry.status}`}
                             >
                               <b>{entry.scoring_type === "technical" ? "Technical" : "Performance"} · {entry.name}</b><em>{entry.status}</em>
@@ -2761,7 +3032,7 @@ export default function Page() {
             <section className="panel records">
               <div className="panel-heading">
                 <h3>
-                  <Users size={16} /> Judge Access
+                  <Users size={16} /> Judge Accounts
                 </h3>
                 <button
                   onClick={() =>
@@ -2769,12 +3040,12 @@ export default function Page() {
                       name: "",
                       username: "",
                       password: "",
-                      slot: 1,
+                      role: "technical_judge",
                       active: true,
                     })
                   }
                 >
-                  <Plus size={15} /> Create Judge
+                  <Plus size={15} /> Create Account
                 </button>
               </div>
               {demo && (
@@ -2783,82 +3054,35 @@ export default function Page() {
                   manage real accounts.
                 </div>
               )}
-              <div className="judge-cards">
-                {[1, 2, 3, 4, 5].map((slot) => {
-                  const p = state.profiles?.find(
-                    (p) => p.slot === slot && p.active,
-                  );
+              <div className="account-cards">
+                {(state.profiles ?? []).map((p) => {
+                  const protectedOrganizer = p.username?.toLowerCase() === "alexandertai";
                   return (
-                    <div key={slot}>
-                      <div className="avatar">
-                        {p?.avatar_url ? <img src={p.avatar_url} alt={`${p.name} profile`} /> : p ? p.name.trim().split(/\s+/).slice(0, 2).map((n) => n[0]?.toUpperCase()).join("") : `J${slot}`}
+                    <article className={`account-card ${p.archived ? "archived" : ""}`} key={p.id}>
+                      <div className="account-card-identity">
+                        <div className="avatar">
+                          {p.avatar_url ? <img src={p.avatar_url} alt={`${p.name} profile`} /> : p.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("")}
+                        </div>
+                        <div><h3>{p.name}</h3><span>@{p.username}</span></div>
                       </div>
-                      <h3>
-                        {slot < 4 ? "Technical" : "Performance"} {slot}
-                      </h3>
-                      <p>
-                        {p?.name ?? "Unassigned"}
-                        {p && !canEditJudge(p) ? " · Administrator" : ""}
-                      </p>
-                      {p && <small className="judge-profile-meta">@{p.username} · Judge {p.slot} · {p.active ? "Active" : "Inactive"} · {isAdministrator(p) ? "Administrator" : "Judge"}</small>}
-                      <button
-                        disabled={!!p && !canEditJudge(p)}
-                        onClick={() =>
-                          setUserEdit(
-                            p
-                              ? {
-                                  ...p,
-                                  username: p.username ?? "",
-                                  password: "",
-                                }
-                              : {
-                                  name: "",
-                                  username: "",
-                                  password: "",
-                                  slot,
-                                  active: true,
-                                },
-                          )
-                        }
-                      >
-                        {p && !canEditJudge(p)
-                          ? "Protected administrator"
-                          : p
-                            ? "Manage account"
-                            : "Assign Judge"}
-                      </button>
-                    </div>
+                      <div className="account-card-meta">
+                        <span>{profileRoleLabel(p, profileScoringType(p))}</span>
+                        <span className={p.archived ? "archived-label" : p.active ? "active-label" : "inactive-label"}>{p.archived ? "Archived · former judge" : p.active ? "Active" : "Inactive"}</span>
+                        {protectedOrganizer ? <span>Protected full-access account</span> : null}
+                      </div>
+                      <div className="account-card-actions">
+                      <button type="button" onClick={() => setUserEdit({ ...p, role: p.role === "performance_judge" || p.role === "judge" && (p.slot ?? 1) > 3 ? "performance_judge" : p.role === "organizer" || p.role === "server_admin" ? "organizer" : "technical_judge", username: p.username ?? "", password: "" })}>Manage Account</button>
+                        {p.archived ? (
+                          <button type="button" disabled={demo} onClick={() => void manage("reactivate_user", { id: p.id })}>Reactivate</button>
+                        ) : null}
+                        {!protectedOrganizer && !p.archived ? (
+                          <button type="button" className="danger-button" onClick={() => { setAccountDeleteTarget(p); setAccountDeleteConfirmation(""); }}>Delete Account</button>
+                        ) : null}
+                      </div>
+                    </article>
                   );
                 })}
               </div>
-              {(state.profiles ?? [])
-                .filter((p) => p.active && canEditJudge(p) && state.profiles?.find((candidate) => candidate.slot === p.slot && candidate.active)?.id !== p.id)
-                .map((p) => (
-                  <div className="detail-event" key={p.id}>
-                    {p.avatar_url ? <img className="admin-roster-avatar" src={p.avatar_url} alt={`${p.name} profile`} /> : null}
-                    <span>{p.name} · @{p.username} · {p.slot! < 4 ? "Technical" : "Performance"} Judge {p.slot}</span>
-                    <button onClick={() => setUserEdit({ ...p, username: p.username ?? "", password: "" })}>Manage Account</button>
-                  </div>
-                ))}
-              {state.profiles
-                ?.filter((p) => !p.active && canEditJudge(p))
-                .map((p) => (
-                  <div className="detail-event" key={p.id}>
-                    {p.avatar_url ? <img className="admin-roster-avatar" src={p.avatar_url} alt={`${p.name} profile`} /> : null}
-                    {p.name} · @{p.username} · Judge {p.slot} · Inactive
-                    <button
-                      onClick={() =>
-                        setUserEdit({
-                          ...p,
-                          username: p.username ?? "",
-                          password: "",
-                        })
-                      }
-                    >
-                      Edit Account
-                    </button>
-                  </div>
-                ))}
             </section>
             <section className="panel records">
               <div className="panel-heading">
@@ -2866,11 +3090,6 @@ export default function Page() {
                   <Trophy size={17} /> Global Rankings
                 </h3>
                 <span className="muted">70 technical + 30 performance</span>
-              </div>
-              <div className="info-note">
-                Exhibition is excluded. Incomplete submissions stay pending.
-                Rankings remain provisional until all judges finish. DQ
-                competitors rank last.
               </div>
               {canViewPoints && exports((format, ranked) => {
                 const rows = [...(state.rankings ?? [])]
@@ -2904,8 +3123,16 @@ export default function Page() {
                     Competitor: r.competitor.name,
                     Division: r.competitor.division,
                     Order: r.competitor.position,
-                    ...Object.fromEntries(r.technical.map((value, index) => [`Technical J${index + 1}`, value])),
-                    ...Object.fromEntries(r.performance.map((value, index) => [`Performance J${index + 1}`, value])),
+                    ...Object.fromEntries(r.technical.map((value, index) => {
+                      const assigned = (state.assignments ?? []).filter((assignment) => assignment.division === r.competitor.division && assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "technical").sort((a, b) => a.slot - b.slot)[index];
+                      const judge = state.profiles?.find((candidate) => candidate.id === assigned?.user_id);
+                      return [`Technical · ${judge?.name ?? "Former judge"}`, value];
+                    })),
+                    ...Object.fromEntries(r.performance.map((value, index) => {
+                      const assigned = (state.assignments ?? []).filter((assignment) => assignment.division === r.competitor.division && assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "performance").sort((a, b) => a.slot - b.slot)[index];
+                      const judge = state.profiles?.find((candidate) => candidate.id === assigned?.user_id);
+                      return [`Performance · ${judge?.name ?? "Former judge"}`, value];
+                    })),
                     Raw: r.raw,
                     Scaled: r.scaled,
                     Performance: r.average,
@@ -2926,8 +3153,10 @@ export default function Page() {
                 .filter((d) => d !== "Exhibition")
                 .map((d) => {
                   const divisionJudges = (state.assignments ?? []).filter((assignment) => assignment.division === d);
-                  const technicalJudgeCount = divisionJudges.filter((assignment) => assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "technical").length;
-                  const performanceJudgeCount = divisionJudges.length - technicalJudgeCount;
+                  const divisionTechAssignments = divisionJudges.filter((assignment) => assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "technical").sort((a, b) => a.slot - b.slot);
+                  const divisionPerformanceAssignments = divisionJudges.filter((assignment) => assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "performance").sort((a, b) => a.slot - b.slot);
+                  const technicalJudgeCount = divisionTechAssignments.length;
+                  const performanceJudgeCount = divisionPerformanceAssignments.length;
                   const scoreColumnCount = technicalJudgeCount + performanceJudgeCount + 4;
                   return (
                   <div key={d}>
@@ -2939,8 +3168,8 @@ export default function Page() {
                             {[
                               "Rank",
                               "Competitor",
-                              ...Array.from({ length: technicalJudgeCount }, (_, index) => `Technical J${index + 1}`),
-                              ...Array.from({ length: performanceJudgeCount }, (_, index) => `Performance J${index + 1}`),
+                              ...divisionTechAssignments.map((assignment) => state.profiles?.find((judge) => judge.id === assignment.user_id)?.name ?? "Former judge"),
+                              ...divisionPerformanceAssignments.map((assignment) => state.profiles?.find((judge) => judge.id === assignment.user_id)?.name ?? "Former judge"),
                               "Raw tech",
                               "Scaled /70",
                               "Avg /30",
@@ -3085,7 +3314,7 @@ export default function Page() {
                 }} /> Enable keyboard shortcuts</label>
                 <div className="hotkey-list">
                   {Object.entries(hotkeys).map(([action, key]) => <label key={action}>
-                    <span>{action.replace("level:", "Level ").replace("tab:", "Go to ")}</span>
+                    <span>{hotkeyActionLabel(action)}</span>
                     <input aria-label={`Hotkey for ${action}`} value={key} onChange={(event) => setHotkeys({ ...hotkeys, [action]: event.target.value })} />
                   </label>)}
                 </div>
@@ -3159,6 +3388,31 @@ export default function Page() {
               {modal.confirmLabel ?? "Confirm"}
             </button>
           </div>
+        </Dialog>
+      )}
+      {accountDeleteTarget && (
+        <Dialog title="Confirm Delete Account" close={() => { setAccountDeleteTarget(null); setAccountDeleteConfirmation(""); }}>
+          {(() => {
+            const target = accountDeleteTarget;
+            const hasHistory = accountHasScoreHistory(target.id);
+            const confirmed = accountDeleteConfirmation === target.username;
+            return <>
+              <p className="danger-warning">Account: <b>{target.username}</b><br />Role: <b>{profileRoleLabel(target, profileScoringType(target))}</b></p>
+              <p className="account-delete-impact" role="alert">
+                {hasHistory
+                  ? "This account has saved scoring history. Delete will archive it, immediately block future sign-in, remove future division assignments, and preserve every score and audit record. Organizers can reactivate it later."
+                  : "No score history was found. Delete will permanently remove the account profile and sign-in, plus any empty assignment placeholders. This cannot be undone."}
+              </p>
+              <label>
+                Type <b>{target.username}</b> to confirm
+                <input value={accountDeleteConfirmation} onChange={(event) => setAccountDeleteConfirmation(event.target.value)} autoComplete="off" />
+              </label>
+              <div className="dialog-actions">
+                <button type="button" onClick={() => { setAccountDeleteTarget(null); setAccountDeleteConfirmation(""); }}>Cancel</button>
+                <button type="button" className="danger-button" disabled={!confirmed || demo} onClick={() => void manage("remove_user", { id: target.id })}>{hasHistory ? "Archive Account" : "Permanently Delete"}</button>
+              </div>
+            </>;
+          })()}
         </Dialog>
       )}
       {competitorEdit && (
@@ -3261,28 +3515,55 @@ export default function Page() {
       )}
       {userEdit && (
         <Dialog
-          title={userEdit.id ? "Manage Judge Account" : "Create Judge Account"}
+          title={userEdit.id ? "Manage Account" : "Create Account"}
           close={() => setUserEdit(null)}
         >
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              void manage("user", {
-                ...userEdit,
-                password: userEdit.password || undefined,
-              });
+              const saveAccount = () => void manage("user", { ...userEdit, password: userEdit.password || undefined });
+              const newRole = userEdit.role ?? "technical_judge";
+              const removedAssignments = userEdit.id
+                ? (state?.assignments ?? []).filter((assignment) => assignment.user_id === userEdit.id && !profileCanScoreType({ ...userEdit, role: newRole, active: true } as Profile, assignmentScoringType(assignment)))
+                : [];
+              if (removedAssignments.length) {
+                setModal({
+                  title: "Change Account Role?",
+                  body: `Changing this role will remove ${removedAssignments.length} incompatible division assignment${removedAssignments.length === 1 ? "" : "s"}. Existing scoring and audit history will remain attributed to this account.`,
+                  action: saveAccount,
+                  confirmLabel: "Confirm Role Change",
+                  danger: true,
+                });
+              } else saveAccount();
             }}
           >
+            <label>
+              Display name
+              <input type="text" required maxLength={100} value={userEdit.name ?? ""} onChange={(event) => setUserEdit({ ...userEdit, name: event.target.value })} />
+            </label>
             <label>
               Username
               <input
                 type="text"
                 required
+                readOnly={userEdit.username?.toLowerCase() === "alexandertai"}
                 value={userEdit.username ?? ""}
                 onChange={(e) =>
                   setUserEdit({ ...userEdit, username: e.target.value })
                 }
               />
+            </label>
+            <label>
+              Role
+              <select
+                value={userEdit.role === "performance_judge" ? "performance_judge" : userEdit.role === "organizer" || userEdit.role === "server_admin" ? "organizer" : "technical_judge"}
+                disabled={userEdit.username?.toLowerCase() === "alexandertai"}
+                onChange={(event) => setUserEdit({ ...userEdit, role: event.target.value as Profile["role"] })}
+              >
+                <option value="technical_judge">Technical Judge</option>
+                <option value="performance_judge">Performance Judge</option>
+                <option value="organizer">Organizer</option>
+              </select>
             </label>
             <label>
               {userEdit.id
@@ -3297,35 +3578,7 @@ export default function Page() {
                 }
               />
             </label>
-            <label>
-              Assigned slot
-              <select
-                value={userEdit.slot ?? 1}
-                onChange={(e) =>
-                  setUserEdit({ ...userEdit, slot: Number(e.target.value) })
-                }
-              >
-                {[1, 2, 3, 4, 5].map((n) => (
-                  <option key={n} value={n}>
-                    {n < 4 ? "Technical" : "Performance"} Judge {n}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={userEdit.active ?? true}
-                onChange={(e) =>
-                  setUserEdit({ ...userEdit, active: e.target.checked })
-                }
-              />{" "}
-              Account active
-            </label>
-            <p>
-              Deactivate the previous holder before reassigning a slot. Existing
-              submissions remain attributed to their original author.
-            </p>
+            <p>Division assignments are managed separately. Organizers are scoring judges only when explicitly assigned.</p>
             <div className="dialog-actions">
               <button type="button" onClick={() => setUserEdit(null)}>
                 Cancel

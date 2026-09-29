@@ -497,5 +497,135 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     /Organizer required/,
   );
   await assert.rejects(invoke(crypto.randomUUID(), 3), /no longer active/);
+
+  // Migrate global account slots to roles; division assignments retain their own scoring group.
+  await db.exec(readFileSync("supabase/migrations/20260928205013_role_model_and_account_lifecycle.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/20260928213559_execution_scoring_workflow.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/20260928230000_lock_submitted_scores.sql", "utf8"));
+  const executionConfig = await db.query<{ revision: number; data_revision: number; rules: Record<string, any> }>(
+    "select revision,data_revision,rules from scoring_configuration where config_id='global'",
+  );
+  assert.equal(executionConfig.rows[0].revision, 3);
+  assert.deepEqual(executionConfig.rows[0].rules.executions, { E0: 1, "E-1": 0.9, "E-2": 0.8, "E-3": 0.7 });
+  const executionRules = structuredClone(executionConfig.rows[0].rules);
+  executionRules.executions["E-2"] = 0.5;
+  const executionUpdate = await db.query<{ result: Record<string, any> }>(
+    "select public.update_scoring_configuration($1,$2,$3,$4,$5) as result",
+    [admin, executionConfig.rows[0].revision, executionConfig.rows[0].data_revision, JSON.stringify(executionRules), JSON.stringify({ technicalEventValues: 1 })],
+  );
+  assert.equal(executionUpdate.rows[0].result.revision, 4);
+  assert.deepEqual(executionUpdate.rows[0].result.impact, { technicalEventValues: 1 });
+  const executionAudit = await db.query<{ next: Record<string, any> }>(
+    "select next from audit where action='scoring_configuration_update' and user_id=$1 order by id desc limit 1",
+    [admin],
+  );
+  assert.deepEqual(executionAudit.rows[0].next.affected_rules, ["execution:E-2"]);
+  assert.equal(executionAudit.rows[0].next.recalculation.performed, true);
+  const migratedRoles = await db.query<{ id: string; role: string }>(
+    "select id,role from profiles where id=any($1::uuid[]) order by id",
+    [[user, other, admin]],
+  );
+  assert.equal((await db.query("select column_name from information_schema.columns where table_name='profiles' and column_name='slot'")).rows.length, 0);
+  assert.equal(migratedRoles.rows.find((row) => row.id === user)?.role, "organizer");
+  assert.equal(migratedRoles.rows.find((row) => row.id === other)?.role, "technical_judge");
+  assert.equal(migratedRoles.rows.find((row) => row.id === admin)?.role, "organizer");
+
+  const addAccount = async (name: string, role: "technical_judge" | "performance_judge" | "organizer") => {
+    const id = crypto.randomUUID();
+    await db.query("insert into auth.users values($1)", [id]);
+    await db.query("insert into profiles(id,name,username,role,is_admin) values($1,$2,$3,$4,$5)", [id, name, name.toLowerCase().replaceAll(" ", ""), role, role === "organizer"]);
+    return id;
+  };
+  const technicalOne = await addAccount("Taylor Chen", "technical_judge");
+  const technicalTwo = await addAccount("Morgan Lee", "technical_judge");
+  const performanceOne = await addAccount("Riley Shah", "performance_judge");
+  const scoringOrganizer = await addAccount("Event Organizer", "organizer");
+  const unused = await addAccount("Unused Judge", "technical_judge");
+  const assignments = [
+    { slot: 1, user_id: technicalOne, scoring_type: "technical" },
+    { slot: 2, user_id: technicalTwo, scoring_type: "technical" },
+    { slot: 3, user_id: performanceOne, scoring_type: "performance" },
+    { slot: 4, user_id: scoringOrganizer, scoring_type: "performance" },
+  ];
+  await assert.rejects(db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Individual Open", JSON.stringify([
+    { slot: 1, user_id: technicalOne, scoring_type: "performance" },
+    { slot: 2, user_id: performanceOne, scoring_type: "technical" },
+  ])]), /role matches the scoring group/);
+  await db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Individual Open", JSON.stringify(assignments)]);
+  const teamAssignments = [
+    { slot: 1, user_id: technicalTwo, scoring_type: "technical" },
+    { slot: 2, user_id: performanceOne, scoring_type: "performance" },
+  ];
+  await db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Team Division", JSON.stringify(teamAssignments)]);
+  assert.deepEqual(
+    (await db.query<{ user_id: string; scoring_type: string }>("select user_id,scoring_type from division_judges where division='Team Division' order by slot")).rows,
+    teamAssignments.map(({ user_id, scoring_type }) => ({ user_id, scoring_type })),
+  );
+  const changedDivision = await db.query<{ next: Record<string, any> }>(
+    "select next from audit where action='judge_assignments' and next->>'division'='Individual Open' order by id desc limit 1",
+  );
+  assert.ok(changedDivision.rows[0].next.saved_submissions_affected >= 0);
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: comp })]);
+  const savedEvent = JSON.stringify({ id: crypto.randomUUID(), trick: "T 1D", level: 1, features: [], execution: "E-2", at: new Date().toISOString() });
+  await db.query("select apply_score($1,99,$2,$3,0,'put_event',$4)", [technicalOne, crypto.randomUUID(), comp, savedEvent]);
+  const eventHistory = await db.query<{ events: Array<{ execution?: string }> }>(
+    "select events from submissions where competitor_id=$1 and user_id=$2",
+    [comp, technicalOne],
+  );
+  assert.equal(eventHistory.rows[0].events[0].execution, "E-2", "saved events retain their execution selection");
+  await db.query("select apply_score($1,1,$2,$3,1,'finish',$4)", [technicalOne, crypto.randomUUID(), comp, scorePayload]);
+  const submitted = await db.query<{ id: string; version: number; finished: boolean; submitted_at: string | null }>(
+    "select id,version,finished,submitted_at from submissions where competitor_id=$1 and user_id=$2",
+    [comp, technicalOne],
+  );
+  assert.deepEqual(
+    { version: submitted.rows[0].version, finished: submitted.rows[0].finished, hasSubmittedAt: !!submitted.rows[0].submitted_at },
+    { version: 2, finished: true, hasSubmittedAt: true },
+  );
+  await assert.rejects(
+    db.query("select apply_score($1,1,$2,$3,$4,'put_event',$5)", [
+      technicalOne, crypto.randomUUID(), comp, submitted.rows[0].version,
+      JSON.stringify({ id: crypto.randomUUID(), trick: "T 2D", level: 1, features: [], at: new Date().toISOString() }),
+    ]),
+    /already submitted; ask the Organizer to reopen it/,
+  );
+  await assert.rejects(
+    db.query("select apply_score($1,1,$2,$3,$4,'finish',$5)", [technicalOne, crypto.randomUUID(), comp, submitted.rows[0].version, JSON.stringify({ finished: false })]),
+    /already submitted; ask the Organizer to reopen it/,
+  );
+  await db.query("select review_submission($1,$2,$3,false,false)", [admin, submitted.rows[0].id, submitted.rows[0].version]);
+  const reopened = await db.query<{ finished: boolean; version: number }>("select finished,version from submissions where id=$1", [submitted.rows[0].id]);
+  assert.deepEqual(reopened.rows[0], { finished: false, version: 3 }, "manager reopen restores editing and increments the version");
+  await db.query("select apply_score($1,1,$2,$3,3,'put_event',$4)", [
+    technicalOne, crypto.randomUUID(), comp,
+    JSON.stringify({ id: crypto.randomUUID(), trick: "T 2D", level: 1, features: [], at: new Date().toISOString() }),
+  ]);
+  await assert.rejects(db.query("select apply_score($1,1,$2,$3,0,'put_event',$4)", [performanceOne, crypto.randomUUID(), comp, savedEvent]), /Technical Judge assignment required/);
+  await assert.rejects(db.query("select apply_score($1,1,$2,$3,0,'performance',$4)", [technicalOne, crypto.randomUUID(), comp, JSON.stringify({ values: [4,4,4,4,4,4] })]), /Performance Judge assignment required/);
+  await assert.rejects(db.query("select apply_score($1,1,$2,$3,0,'finish',$4)", [admin, crypto.randomUUID(), comp, scorePayload]), /not assigned to this competitor division/);
+  await db.query("select apply_score($1,1,$2,$3,0,'finish',$4)", [scoringOrganizer, crypto.randomUUID(), comp, scorePayload]);
+
+  // Role change removes only incompatible future assignments; the finished submission keeps its original type.
+  await db.query("select apply_score($1,2,$2,$3,0,'finish',$4)", [technicalTwo, crypto.randomUUID(), comp, scorePayload]);
+  await db.query("select change_judge_account_role($1,$2,'performance_judge')", [admin, technicalTwo]);
+  const preserved = await db.query<{ scoring_type: string; finished: boolean }>("select scoring_type,finished from submissions where competitor_id=$1 and user_id=$2", [comp, technicalTwo]);
+  assert.deepEqual(preserved.rows[0], { scoring_type: "technical", finished: true });
+  assert.equal((await db.query("select 1 from division_judges where division='Individual Open' and user_id=$1", [technicalTwo])).rows.length, 0);
+
+  const unusedResult = await db.query<{ remove_judge_account: Record<string, any> }>("select remove_judge_account($1,$2)", [admin, unused]);
+  assert.equal(unusedResult.rows[0].remove_judge_account.hard_delete, true);
+  await db.query("delete from auth.users where id=$1", [unused]);
+  assert.equal((await db.query("select id from profiles where id=$1", [unused])).rows.length, 0);
+  const archivedResult = await db.query<{ remove_judge_account: Record<string, any> }>("select remove_judge_account($1,$2)", [admin, scoringOrganizer]);
+  assert.equal(archivedResult.rows[0].remove_judge_account.archived, true);
+  assert.equal((await db.query("select id from submissions where competitor_id=$1 and user_id=$2", [comp, scoringOrganizer])).rows.length, 1);
+  assert.equal((await db.query("select 1 from division_judges where user_id=$1", [scoringOrganizer])).rows.length, 0);
+  await db.query("select reactivate_judge_account($1,$2)", [admin, scoringOrganizer]);
+  assert.equal((await db.query<{ active: boolean; archived: boolean }>("select active,archived from profiles where id=$1", [scoringOrganizer])).rows[0].active, true);
+  await db.query("select remove_judge_account($1,$2)", [admin, scoringOrganizer]);
+  await assert.rejects(db.query("select remove_judge_account($1,$2)", [admin, admin]), /final active Organizer/);
+  assert.ok((await db.query("select id from audit where action='account_role_change' and user_id=$1", [admin])).rows.length > 0);
+  assert.ok((await db.query("select id from audit where action='account_archive' and user_id=$1", [admin])).rows.length > 0);
+  assert.ok((await db.query("select id from audit where action='account_reactivate' and user_id=$1", [admin])).rows.length > 0);
   await db.close();
 });

@@ -1,27 +1,28 @@
 import { z } from "zod";
 import { identity, failure } from "@/lib/server";
-import { canManage, canEditJudge } from "@/lib/access";
+import { canManage } from "@/lib/access";
 import { usernameSchema, internalAddress } from "@/lib/usernames";
+
+const accountRole = z.enum(["technical_judge", "performance_judge", "organizer"]);
+
 export async function POST(req: Request) {
   try {
     const { client, profile } = await identity(req);
-    if (!canManage(profile)) throw new Error("Administrator access required");
+    if (!canManage(profile)) throw new Error("Organizer access required");
     const { action, data } = await req.json();
+    let accountOutcome: Record<string, unknown> | undefined;
     if (["activate", "lock", "save"].includes(action)) {
-      const parsed =
-        action === "save"
-          ? z
-              .object({
-                id: z.string().uuid().optional(),
-                name: z.string().trim().min(1).max(100),
-                division: z.string().min(1),
-                position: z.number().int().min(1),
-                status: z.enum(["upcoming", "active", "locked"]),
-                dq: z.boolean(),
-                archived: z.boolean(),
-              })
-              .parse(data)
-          : z.object({ id: z.string().uuid() }).parse(data);
+      const parsed = action === "save"
+        ? z.object({
+            id: z.string().uuid().optional(),
+            name: z.string().trim().min(1).max(100),
+            division: z.string().min(1),
+            position: z.number().int().min(1),
+            status: z.enum(["upcoming", "active", "locked"]),
+            dq: z.boolean(),
+            archived: z.boolean(),
+          }).parse(data)
+        : z.object({ id: z.string().uuid() }).parse(data);
       const { error } = await client.rpc("manage_competitor", {
         p_actor: profile.id,
         p_action: action,
@@ -33,6 +34,7 @@ export async function POST(req: Request) {
       const input = z.object({
         division: z.string().trim().min(1).max(80),
         assignments: z.array(z.object({
+          // This is only a private ordering key for the database, not an account slot.
           slot: z.number().int().min(1).max(10),
           user_id: z.string().uuid(),
           scoring_type: z.enum(["technical", "performance"]),
@@ -52,99 +54,115 @@ export async function POST(req: Request) {
       const { error } = await client.from("divisions").insert({ name });
       if (error?.code === "23505") throw new Error("That division already exists. Select it from the Division list instead.");
       if (error) throw new Error(error.message);
-      const audit = await client.from("audit").insert({
-        user_id: profile.id,
-        action: "division_create",
-        next: { name },
-      });
-      if (audit.error)
-        throw new Error(
-          "Division created, but audit logging failed. Contact the organizer.",
-        );
+      const audit = await client.from("audit").insert({ user_id: profile.id, action: "division_create", next: { name } });
+      if (audit.error) throw new Error("Division created, but audit logging failed. Contact the organizer.");
     } else if (action === "delete") {
       const input = z.object({ id: z.string().uuid() }).parse(data);
-      const { error } = await client.rpc("delete_competitor", {
-        p_actor: profile.id,
-        p_id: input.id,
-      });
+      const { error } = await client.rpc("delete_competitor", { p_actor: profile.id, p_id: input.id });
       if (error) throw new Error(error.message);
     } else if (action === "user") {
-      const u = z
-        .object({
-          id: z.string().uuid().optional(),
-          username: usernameSchema,
-          password: z.string().min(6).optional(),
-          slot: z.number().int().min(1).max(5),
-          active: z.boolean(),
-        })
-        .parse(data);
-      let id = u.id;
-      const duplicate = await client
-        .from("profiles")
-        .select("id")
-        .eq("username", u.username)
-        .neq("id", id ?? "00000000-0000-0000-0000-000000000000")
-        .maybeSingle();
+      const u = z.object({
+        id: z.string().uuid().optional(),
+        name: z.string().trim().min(1).max(100),
+        username: usernameSchema,
+        role: accountRole,
+        password: z.string().min(6).max(256).optional(),
+      }).parse(data);
+      if (!u.id && !u.password) throw new Error("A password is required for a new account");
+
+      const duplicate = await client.from("profiles").select("id").eq("username", u.username)
+        .neq("id", u.id ?? "00000000-0000-0000-0000-000000000000").maybeSingle();
+      if (duplicate.error) throw duplicate.error;
       if (duplicate.data) throw new Error("Username is already in use");
-      const prior = id
-        ? (await client.from("profiles").select("*").eq("id", id).single()).data
+
+      const priorResult = u.id
+        ? await client.from("profiles").select("id,name,username,role,active,is_admin,archived").eq("id", u.id).maybeSingle()
         : null;
-      if (id && (!prior || !canEditJudge(prior)))
-        throw new Error(
-          "Administrator accounts are protected from judge management",
-        );
+      if (priorResult?.error) throw priorResult.error;
+      const prior = priorResult?.data ?? null;
+      if (u.id && !prior) throw new Error("Account not found");
+      if (prior?.username?.toLowerCase() === "alexandertai") {
+        if (u.username.toLowerCase() !== "alexandertai" || u.role !== "organizer")
+          throw new Error("alexandertai must remain the protected full-access Organizer account");
+      }
+      if (prior?.role === "organizer" && prior.active && u.role !== "organizer") {
+        const { count, error } = await client.from("profiles").select("id", { count: "exact", head: true }).eq("role", "organizer").eq("active", true);
+        if (error) throw error;
+        if ((count ?? 0) <= 1) throw new Error("At least one active Organizer account must remain");
+      }
+
+      let id = u.id;
       if (!id) {
-        if (!u.password) throw new Error("Password required");
-        const result = await client.auth.admin.createUser({
-          email: internalAddress(u.username),
-          password: u.password,
-          email_confirm: true,
+        const created = await client.auth.admin.createUser({
+          email: internalAddress(u.username), password: u.password!, email_confirm: true,
         });
-        if (result.error) throw result.error;
-        id = result.data.user.id;
+        if (created.error) throw created.error;
+        id = created.data.user.id;
+        const inserted = await client.from("profiles").insert({
+          id, name: u.name, username: u.username, role: u.role, active: true,
+          archived: false, is_admin: u.role === "organizer",
+        });
+        if (inserted.error) {
+          await client.auth.admin.deleteUser(id);
+          throw inserted.error;
+        }
+        const audit = await client.from("audit").insert({
+          user_id: profile.id, action: "account_create", prior: null,
+          next: { id, name: u.name, username: u.username, role: u.role },
+        });
+        if (audit.error) throw new Error("Account created, but audit logging failed. Contact the organizer.");
       } else {
-        const result = await client.auth.admin.updateUserById(id, {
-          // Username changes do not rotate Auth identifiers or invalidate pending work.
-          ...(u.password ? { password: u.password } : {}),
+        if (u.password) {
+          const updated = await client.auth.admin.updateUserById(id, { password: u.password });
+          if (updated.error) throw updated.error;
+        }
+        if (prior!.role !== u.role) {
+          const changed = await client.rpc("change_judge_account_role", {
+            p_actor: profile.id, p_target: id, p_role: u.role,
+          });
+          if (changed.error) throw new Error(changed.error.message);
+        }
+        const updated = await client.from("profiles").update({
+          name: u.name, username: u.username,
+          is_admin: u.role === "organizer",
+        }).eq("id", id).select("id").single();
+        if (updated.error) throw updated.error;
+        const audit = await client.from("audit").insert({
+          user_id: profile.id, action: "account_update",
+          prior: { id, name: prior!.name, username: prior!.username, role: prior!.role, active: prior!.active },
+          next: { id, name: u.name, username: u.username, role: u.role, active: prior!.active },
         });
-        if (result.error) throw result.error;
+        if (audit.error) throw new Error("Account updated, but audit logging failed. Contact the organizer.");
       }
-      const values = {
-        id,
-        name: u.username,
-        username: u.username,
-        slot: u.slot,
-        active: u.active,
-        role: "judge",
-      };
-      // Conditional updates also guard against a concurrent administrator grant.
-      const result = u.id
-        ? await client
-            .from("profiles")
-            .update(values)
-            .eq("id", id!)
-            .eq("role", "judge")
-            .eq("is_admin", false)
-            .select("id")
-            .single()
-        : await client.from("profiles").insert({ ...values, is_admin: false });
-      const { error } = result;
-      if (error) {
-        if (!u.id) await client.auth.admin.deleteUser(id!);
-        throw new Error(error.message);
+    } else if (["remove_user", "reactivate_user"].includes(action)) {
+      const input = z.object({ id: z.string().uuid() }).parse(data);
+      const target = await client.from("profiles").select("id,username,name,role,active,avatar_path").eq("id", input.id).maybeSingle();
+      if (target.error) throw target.error;
+      if (!target.data) throw new Error("Account not found");
+      if (target.data.username?.toLowerCase() === "alexandertai") throw new Error("alexandertai is the protected full-access Organizer account");
+      if (action === "reactivate_user") {
+        const { error } = await client.rpc("reactivate_judge_account", { p_actor: profile.id, p_target: input.id });
+        if (error) throw new Error(error.message);
+      } else {
+        const { data: outcome, error } = await client.rpc("remove_judge_account", { p_actor: profile.id, p_target: input.id });
+        if (error) throw new Error(error.message);
+        accountOutcome = outcome as Record<string, unknown>;
+        if (outcome?.hard_delete) {
+          if (target.data.avatar_path) {
+            const cleared = await client.from("profiles").update({ avatar_path: null }).eq("id", input.id);
+            if (cleared.error) throw new Error(`Account was disabled, but its picture could not be detached: ${cleared.error.message}`);
+            const removed = await client.storage.from("profile-avatars").remove([target.data.avatar_path]);
+            if (removed.error) throw new Error(`Account was disabled, but its picture could not be removed: ${removed.error.message}`);
+          }
+          const deleted = await client.auth.admin.deleteUser(input.id);
+          if (deleted.error) {
+            await client.from("audit").insert({ user_id: profile.id, action: "account_delete_failed", prior: { id: input.id, username: target.data.username, role: target.data.role }, next: { error: deleted.error.message } });
+            throw new Error(`Account was safely disabled, but permanent deletion failed: ${deleted.error.message}`);
+          }
+        }
       }
-      const audit = await client.from("audit").insert({
-        user_id: profile.id,
-        action: "user",
-        prior,
-        next: { id, username: u.username, slot: u.slot, active: u.active },
-      });
-      if (audit.error)
-        throw new Error(
-          "Account updated, but audit logging failed. Contact the organizer.",
-        );
     } else throw new Error("Unknown action");
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, ...(accountOutcome ?? {}) });
   } catch (e) {
     return failure(e);
   }

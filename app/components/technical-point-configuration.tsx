@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowLeft, Save, SlidersHorizontal } from "lucide-react";
 import { api } from "@/lib/supabase";
-import { deductions, tricks } from "@/lib/model";
-import type { ScoringConfiguration, ScoringRules } from "@/lib/model";
+import { deductions, executionLabels, executionOptions, tricks } from "@/lib/model";
+import type { Execution, ScoringConfiguration, ScoringRules } from "@/lib/model";
 import type { ScoringConfigurationImpact } from "@/lib/scoring-config";
 
 const confirmPhrase = "UPDATE POINT VALUES";
@@ -16,6 +16,7 @@ type RuleDraft = {
   deductions: Record<string, string>;
   levels: Record<string, string>;
   features: Record<string, string>;
+  executions: Record<Execution, string>;
 };
 type Preview = {
   revision: number;
@@ -40,6 +41,7 @@ function toDraft(rules: ScoringRules): RuleDraft {
     deductions: convert(rules.deductions),
     levels: convert(rules.levels),
     features: convert(rules.features),
+    executions: convert(rules.executions) as Record<Execution, string>,
   };
 }
 
@@ -51,6 +53,7 @@ function parseDraft(draft: RuleDraft): ScoringRules {
     deductions: convert(draft.deductions),
     levels: convert(draft.levels),
     features: convert(draft.features),
+    executions: convert(draft.executions) as Record<Execution, number>,
   };
 }
 
@@ -60,6 +63,7 @@ function validateDraft(rules: ScoringRules) {
     ...Object.values(rules.deductions),
     ...Object.values(rules.levels),
     ...Object.values(rules.features),
+    ...Object.values(rules.executions),
   ];
   if (values.some((value) => !Number.isFinite(value))) return "Enter a number for every point value.";
   if (Object.values(rules.bases).some((group) => Object.values(group).some((value) => value < 0 || value > 1000))) {
@@ -68,8 +72,8 @@ function validateDraft(rules: ScoringRules) {
   if (Object.values(rules.deductions).some((value) => value < -1000 || value > 0)) {
     return "Deduction values must be between −1,000 and 0.";
   }
-  if ([...Object.values(rules.levels), ...Object.values(rules.features)].some((value) => value < 0.01 || value > 100)) {
-    return "Level and feature multipliers must be between 0.01 and 100.";
+  if ([...Object.values(rules.levels), ...Object.values(rules.features), ...Object.values(rules.executions)].some((value) => value < 0.01 || value > 100)) {
+    return "Level, feature, and execution multipliers must be between 0.01 and 100.";
   }
   return "";
 }
@@ -118,7 +122,7 @@ export default function TechnicalPointConfiguration({
     };
   }, [adminUnlockToken]);
 
-  const setValue = (group: "bases" | "deductions" | "levels" | "features", key: string, value: string, category?: string) => {
+  const setValue = (group: "bases" | "deductions" | "levels" | "features" | "executions", key: string, value: string, category?: string) => {
     setDraft((current) => {
       if (!current) return current;
       if (group === "bases" && category) {
@@ -290,6 +294,17 @@ export default function TechnicalPointConfiguration({
                   <label key={feature}>
                     <span>{feature}</span>
                     <input type="number" min="0.01" max="100" step="0.1" value={draft.features[feature] ?? ""} onChange={(event) => setValue("features", feature, event.target.value)} aria-label={`${feature} multiplier`} disabled={busy} />
+                  </label>
+                ))}
+              </div>
+            </details>
+            <details data-category="execution">
+              <summary>Execution Multipliers</summary>
+              <div className="point-config-fields" data-category="execution">
+                {executionOptions.map((execution) => (
+                  <label key={execution}>
+                    <span>{executionLabels[execution]}</span>
+                    <input type="number" min="0.01" max="100" step="0.01" value={draft.executions[execution] ?? ""} onChange={(event) => setValue("executions", execution, event.target.value)} aria-label={`${execution} multiplier`} disabled={busy} />
                   </label>
                 ))}
               </div>
