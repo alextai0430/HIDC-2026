@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyLocal, mergeRemoteSnapshotPreservingQueue } from "../lib/local";
+import { applyLocal, mergeRemoteSnapshotPreservingQueue, rebaseQueuedOperationsToOpenWindow } from "../lib/local";
 import type { LocalWorkspace } from "../lib/local";
 import type { Competitor, Operation, Profile, Snapshot, Submission } from "../lib/model";
 
@@ -86,6 +86,20 @@ test("live refresh cannot replace a cached workspace with another account's snap
     protected: false,
   };
   assert.equal(mergeRemoteSnapshotPreservingQueue(local, other), local);
+});
+
+test("offline actions rebase only after an explicit reopen and use the server submission version", () => {
+  const queue: Operation[] = [
+    { id: "queued-1", competitor_id: "reopened", expected_version: 2, kind: "put_event", payload: { id: "event-1" }, scoring_window_revision: "old-revision", scoring_window_token: "old-token" },
+    { id: "queued-2", competitor_id: "reopened", expected_version: 3, kind: "delete_event", payload: { id: "event-1" }, scoring_window_revision: "old-revision", scoring_window_token: "old-token" },
+  ];
+  const rebased = rebaseQueuedOperationsToOpenWindow(queue, "reopened", { revision: "new-revision", token: "new-token" }, 7);
+  assert.deepEqual(rebased?.map(({ expected_version, scoring_window_revision, scoring_window_token }) => ({ expected_version, scoring_window_revision, scoring_window_token })), [
+    { expected_version: 7, scoring_window_revision: "new-revision", scoring_window_token: "new-token" },
+    { expected_version: 8, scoring_window_revision: "new-revision", scoring_window_token: "new-token" },
+  ]);
+  assert.equal(queue[0].scoring_window_revision, "old-revision", "the saved source queue remains untouched");
+  assert.equal(rebaseQueuedOperationsToOpenWindow([...queue, { ...queue[0], id: "other", competitor_id: "different" }], "reopened", { revision: "new-revision", token: "new-token" }, 7), null);
 });
 
 test("offline submit immediately locks the cached submission and records its submit time", () => {

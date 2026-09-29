@@ -313,6 +313,8 @@ test("sync leaves division authorization to the server-side assignment check", a
     id: crypto.randomUUID(),
     competitor_id: crypto.randomUUID(),
     expected_version: 7,
+    scoring_window_revision: crypto.randomUUID(),
+    scoring_window_token: crypto.randomUUID(),
     kind: "put_event",
     payload: {
       id: crypto.randomUUID(),
@@ -330,6 +332,14 @@ test("sync leaves division authorization to the server-side assignment check", a
   assert.equal(calls[0][1].p_user, alex.id);
   assert.equal(calls[0][1].p_slot, 1);
   assert.equal(calls[0][1].p_version, 7);
+  assert.equal(calls[0][1].p_window_revision, body.scoring_window_revision);
+  assert.equal(calls[0][1].p_window_token, body.scoring_window_token);
+  const legacyOffline = { ...body } as Record<string, unknown>;
+  delete legacyOffline.scoring_window_token;
+  const needsReconciliation = await route("sync", alex, client).POST(request(legacyOffline));
+  assert.equal(needsReconciliation.status, 409);
+  assert.match((await needsReconciliation.json()).error, /remains saved locally.*reconcile/i);
+  assert.equal(calls.length, 1, "a queued action without server-issued window proof never reaches the scoring RPC");
   assert.equal((await route("sync", organizer, client).POST(request(body))).status, 200);
   assert.equal(calls.length, 2);
   const reopenRequest = {
@@ -510,6 +520,16 @@ test("state endpoint masks score data until unlock and only returns own judge po
                       { division: "Team Division", slot: index + 1, user_id: row.id, scoring_type },
                     ];
                   })
+              : table === "competitor_judges"
+                ? scoringProfiles.map((row, index) => ({
+                    competitor_id: competitor.id,
+                    user_id: row.id,
+                    scoring_type: row.role === "performance_judge" ? "performance" : "technical",
+                    roster_order: index + 1,
+                    display_name: row.name,
+                    role_snapshot: row.role,
+                    expected: true,
+                  }))
               : table === "profiles"
                 ? profiles.map((row) => ({
                     ...row,
@@ -538,6 +558,14 @@ test("state endpoint masks score data until unlock and only returns own judge po
         };
         return builder;
       },
+      rpc: async (name: string, args: Record<string, string>) => name === "issue_scoring_window"
+        ? { data: args.p_user === p.id ? {
+            competitor_id: competitor.id,
+            revision: crypto.randomUUID(),
+            token: crypto.randomUUID(),
+            opened_at: new Date().toISOString(),
+          } : null, error: null }
+        : { data: null, error: null },
       storage: {
         from: () => ({
           createSignedUrl: async (path: string) => ({
@@ -949,13 +977,11 @@ test("organizers can create each supported account role without numbered slots",
   }
 });
 
-test("account removal deletes unused Auth accounts but archives scored accounts", async () => {
-  for (const outcome of [
-    { hard_delete: true, archived: false, score_history: false },
-    { hard_delete: false, archived: true, score_history: true },
-  ]) {
+test("organizer permanently deletes accounts with or without score history through the preservation trigger", async () => {
+  for (const scoreCount of [0, 3]) {
     let authDeletions = 0;
-    let calledRpc = false;
+    let prepareCalled = false;
+    let cancelled = false;
     const targetId = crypto.randomUUID();
     const client = {
       from: (table: string) => {
@@ -968,15 +994,20 @@ test("account removal deletes unused Auth accounts but archives scored accounts"
               : null,
             error: null,
           }),
+          then: (done: (value: unknown) => unknown) =>
+            Promise.resolve({ count: scoreCount, error: null }).then(done),
         };
         return builder;
       },
       rpc: async (name: string, args: Record<string, string>) => {
-        assert.equal(name, "remove_judge_account");
         assert.equal(args.p_actor, alex.id);
         assert.equal(args.p_target, targetId);
-        calledRpc = true;
-        return { data: outcome, error: null };
+        if (name === "prepare_judge_deletion") {
+          prepareCalled = true;
+          return { data: { avatar_path: null }, error: null };
+        }
+        if (name === "cancel_judge_deletion") cancelled = true;
+        return { data: null, error: null };
       },
       auth: { admin: { deleteUser: async (id: string) => {
         assert.equal(id, targetId);
@@ -984,15 +1015,16 @@ test("account removal deletes unused Auth accounts but archives scored accounts"
         return { error: null };
       } } },
     };
-    const response = await route("manage", alex, client).POST(request({ action: "remove_user", data: { id: targetId } }));
-    assert.equal(response.status, 200);
-    assert.equal(calledRpc, true);
-    assert.equal(authDeletions, outcome.hard_delete ? 1 : 0);
-    assert.equal((await response.json()).archived, outcome.archived);
+    const response = await route("manage", alex, client).POST(request({ action: "remove_user", data: { id: targetId, confirmation: "formerjudge" } }));
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    assert.equal(prepareCalled, true);
+    assert.equal(authDeletions, 1, "an account with scores is also deleted rather than archived");
+    assert.equal(cancelled, false);
+    assert.deepEqual(await response.json(), { ok: true, permanentlyDeleted: true, submittedScoresPreserved: scoreCount > 0 });
   }
 
   const noDatabaseAccess = { from: () => { throw new Error("Organizer authorization should fail first"); } };
-  const denied = await route("manage", judges[0], noDatabaseAccess).POST(request({ action: "remove_user", data: { id: crypto.randomUUID() } }));
+  const denied = await route("manage", judges[0], noDatabaseAccess).POST(request({ action: "remove_user", data: { id: crypto.randomUUID(), confirmation: "DELETE JUDGE" } }));
   assert.equal(denied.status, 400);
   assert.match((await denied.json()).error, /Organizer access required/);
 });

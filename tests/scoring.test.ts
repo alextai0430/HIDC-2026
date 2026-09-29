@@ -227,6 +227,32 @@ test("impact summary includes affected submissions and every finalized ranking i
     finalizedRankings: 2,
   });
 });
+
+test("configuration impact keeps deleted judges' submitted scores in the locked roster completion count", () => {
+  const oldRules = structuredClone(DEFAULT_SCORING_RULES);
+  const newRules = structuredClone(oldRules);
+  newRules.bases.T["1D"] = 2;
+  const competitor: Competitor = {
+    id: "preserved-competitor", name: "Preserved", division: "Open", position: 1,
+    status: "locked", dq: false, archived: false,
+  };
+  const submissions: Submission[] = [
+    { id: "tech-score", competitor_id: competitor.id, user_id: "judge-tech", historical_user_id: "judge-tech", slot: 1, scoring_type: "technical", events: [{ id: "event", trick: "T 1D", level: 1, features: [], at: "2026-09-01T12:00:00.000Z" }], performance: [], finished: true, dq: false, version: 1, updated_at: "2026-09-01T12:00:00.000Z" },
+    { id: "former-performance", competitor_id: competitor.id, user_id: null, historical_user_id: "deleted-perf", judge_name_snapshot: "Riley Shah", judge_role_snapshot: "performance_judge", slot: 2, scoring_type: "performance", events: [], performance: [4, 4, 4, 4, 4, 4], finished: true, dq: false, version: 1, updated_at: "2026-09-01T12:00:00.000Z" },
+  ];
+  const impact = calculateScoringConfigurationImpact(oldRules, newRules, submissions, [competitor],
+    [{ division: "Open", slot: 1, user_id: "judge-tech", scoring_type: "technical" }],
+    [
+      { competitor_id: competitor.id, user_id: "judge-tech", scoring_type: "technical", expected: true },
+      { competitor_id: competitor.id, user_id: "deleted-perf", scoring_type: "performance", expected: true },
+      { competitor_id: competitor.id, user_id: "no-longer-expected", scoring_type: "technical", expected: false },
+    ],
+  );
+  assert.deepEqual(impact, {
+    technicalSubmissions: 1, technicalEventValues: 1, competitors: 1,
+    rankingDivisions: 1, finalizedRankings: 1,
+  });
+});
 test("local edit preserves order and delete is reversible in history operations", () => {
   const first = event("T 1D"),
     second = event("O 2D");

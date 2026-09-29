@@ -12,6 +12,7 @@ export type LocalWorkspace = {
   snapshot: Snapshot;
   queue: Operation[];
   appearancePending?: { preferences: AppearancePreferences; updatedAt: string } | null;
+  hotkeysPending?: { preferences: { enabled: boolean; keys: Record<string, string> }; updatedAt: string } | null;
 };
 export async function readLocal(
   user: string,
@@ -122,4 +123,21 @@ export function mergeRemoteSnapshotPreservingQueue(
     structuredClone(remote),
   );
   return { ...current, snapshot, queue: [...current.queue] };
+}
+
+/** Re-authorize retained local work only for a server-confirmed, open competitor. */
+export function rebaseQueuedOperationsToOpenWindow(
+  queue: Operation[],
+  competitorId: string,
+  window: { revision: string; token: string },
+  serverVersion: number,
+): Operation[] | null {
+  if (!queue.length || queue.some((operation) => operation.competitor_id !== competitorId)) return null;
+  let expectedVersion = serverVersion;
+  return queue.map((operation) => ({
+    ...operation,
+    expected_version: expectedVersion++,
+    scoring_window_revision: window.revision,
+    scoring_window_token: window.token,
+  }));
 }

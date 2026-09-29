@@ -62,6 +62,8 @@ export type Profile = {
   // Safe presentation-only settings for this profile; never copied to admin roster rows.
   appearance_preferences?: AppearancePreferences;
   appearance_updated_at?: string;
+  hotkey_preferences?: { enabled: boolean; keys: Record<string, string> };
+  hotkeys_updated_at?: string;
 };
 export type Competitor = {
   id: string;
@@ -98,7 +100,10 @@ export type ScoringConfiguration = {
 export type Submission = {
   id: string;
   competitor_id: string;
-  user_id: string;
+  user_id: string | null;
+  historical_user_id?: string | null;
+  judge_name_snapshot?: string | null;
+  judge_role_snapshot?: string | null;
   slot: number;
   // Scoring group is snapshotted at submission creation to preserve history.
   // Missing values on old offline snapshots fall back to the legacy internal order.
@@ -118,9 +123,12 @@ export type Operation = {
   expected_version: number;
   kind: "put_event" | "delete_event" | "performance" | "finish" | "dq";
   payload: Record<string, unknown>;
-  // Revision used when this offline action was created. The event itself
-  // stores only selections; the server scores it with the current rules.
+  // Server-issued authorization context. The server accepts mutations only
+  // while this is the currently open scoring window; local timestamps are not
+  // trusted as proof that an offline action predates closure.
   scoring_config_revision?: number;
+  scoring_window_revision?: string;
+  scoring_window_token?: string;
 };
 export type Snapshot = {
   profile: Profile;
@@ -142,9 +150,25 @@ export type Snapshot = {
   pointAccess?: boolean;
   // Safe non-numeric version metadata; used to flag stale offline queues.
   scoringConfigRevision?: number;
+  scoringWindow?: {
+    competitor_id: string;
+    revision: string;
+    token: string;
+    opened_at: string;
+  } | null;
+  judgeRoster?: {
+    competitor_id: string;
+    user_id: string;
+    scoring_type: "technical" | "performance";
+    roster_order: number;
+    display_name: string;
+    role_snapshot: string;
+    expected: boolean;
+  }[];
 };
 export type Ranking = {
   competitor: Competitor;
+  judges?: { user_id: string; scoring_type: "technical" | "performance"; roster_order: number; display_name: string }[];
   technical: (number | null)[];
   performance: (number | null)[];
   raw: number | null;

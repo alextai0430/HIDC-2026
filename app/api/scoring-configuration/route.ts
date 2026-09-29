@@ -77,13 +77,14 @@ export async function POST(req: Request) {
           { status: 409, headers: { "Cache-Control": "no-store" } },
         );
       }
-      const { submissions, competitors, assignments } = await loadImpactData(client);
+      const { submissions, competitors, assignments, judgeRoster } = await loadImpactData(client);
       const impact = calculateScoringConfigurationImpact(
         config.rules,
         input.rules,
         submissions,
         competitors,
         assignments,
+        judgeRoster,
       );
       return Response.json(
         { revision: config.revision, dataRevision: config.dataRevision, impact, unchanged: sameJson(config.rules, input.rules) },
@@ -111,13 +112,14 @@ export async function POST(req: Request) {
         { status: 409, headers: { "Cache-Control": "no-store" } },
       );
     }
-    const { submissions, competitors, assignments } = await loadImpactData(client);
+    const { submissions, competitors, assignments, judgeRoster } = await loadImpactData(client);
     const currentImpact = calculateScoringConfigurationImpact(
       config.rules,
       input.rules,
       submissions,
       competitors,
       assignments,
+      judgeRoster,
     );
     if (!sameJson(input.impact, currentImpact)) {
       return Response.json(
@@ -179,7 +181,7 @@ function authorizationFailure(req: Request, profile: Profile) {
 
 function migrationRequired() {
   return Response.json(
-    { error: "Apply Supabase migration 20260928213559_execution_scoring_workflow.sql before using Technical Point Configuration." },
+    { error: "The required scoring-configuration schema is unavailable. Apply all pending Supabase migrations before editing technical values." },
     { status: 503, headers: { "Cache-Control": "no-store" } },
   );
 }
@@ -188,23 +190,32 @@ async function loadImpactData(client: any): Promise<{
   submissions: Submission[];
   competitors: Competitor[];
   assignments: { division: string; slot: number; user_id: string; scoring_type?: "technical" | "performance" }[];
+  judgeRoster?: { competitor_id: string; user_id: string; scoring_type: "technical" | "performance"; expected: boolean }[];
 }> {
-  let [scoreQuery, competitorQuery, assignmentQuery] = await Promise.all([
-    client.from("submissions").select("id,competitor_id,user_id,slot,scoring_type,events,finished,dq,performance,version,updated_at"),
+  let [scoreQuery, competitorQuery, assignmentQuery, rosterQuery] = await Promise.all([
+    client.from("submissions").select("id,competitor_id,user_id,historical_user_id,slot,scoring_type,events,finished,dq,performance,version,updated_at"),
     client.from("competitors").select("id,name,division,position,status,dq,archived").order("position"),
     client.from("division_judges").select("division,slot,user_id,scoring_type"),
+    client.from("competitor_judges").select("competitor_id,user_id,scoring_type,expected"),
   ]);
   if (["42703", "PGRST204"].includes(scoreQuery.error?.code ?? ""))
-    scoreQuery = await client.from("submissions").select("id,competitor_id,user_id,slot,events,finished,dq,performance,version,updated_at");
+    scoreQuery = await client.from("submissions").select("id,competitor_id,user_id,slot,scoring_type,events,finished,dq,performance,version,updated_at");
   if (["42703", "PGRST204"].includes(assignmentQuery.error?.code ?? ""))
     assignmentQuery = await client.from("division_judges").select("division,slot,user_id");
+  if (["42P01", "PGRST205"].includes(rosterQuery.error?.code ?? "")) rosterQuery = { data: null, error: null };
+  if (["42703", "PGRST204"].includes(scoreQuery.error?.code ?? ""))
+    scoreQuery = await client.from("submissions").select("id,competitor_id,user_id,slot,scoring_type,events,finished,dq,performance,version,updated_at");
+  if (["42703", "PGRST204"].includes(scoreQuery.error?.code ?? ""))
+    scoreQuery = await client.from("submissions").select("id,competitor_id,user_id,slot,events,finished,dq,performance,version,updated_at");
   if (scoreQuery.error) throw new Error(scoreQuery.error.message);
   if (competitorQuery.error) throw new Error(competitorQuery.error.message);
   if (assignmentQuery.error) throw new Error(assignmentQuery.error.message);
+  if (rosterQuery.error) throw new Error(rosterQuery.error.message);
   return {
     submissions: (scoreQuery.data ?? []) as Submission[],
     competitors: (competitorQuery.data ?? []) as Competitor[],
     assignments: assignmentQuery.data ?? [],
+    judgeRoster: rosterQuery.data ?? undefined,
   };
 }
 

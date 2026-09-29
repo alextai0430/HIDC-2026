@@ -22,7 +22,11 @@ export async function GET(req: Request) {
     if (!fullAccess) query = query.eq("user_id", profile.id);
     const { data: subs, error: subError } = await query;
     if (subError) throw subError;
-    const databaseSubmissions = (subs ?? []) as Submission[];
+    const databaseSubmissions = ((subs ?? []) as Submission[]).map((submission) =>
+      fullAccess && !submission.user_id
+        ? { ...submission, user_id: submission.historical_user_id ?? "deleted-judge" }
+        : submission,
+    );
     const submissions = revealPoints
       ? databaseSubmissions
       : databaseSubmissions.map((submission) => {
@@ -63,14 +67,42 @@ export async function GET(req: Request) {
     if (!fullAccess) assignmentsQuery = assignmentsQuery.eq("user_id", profile.id);
     const assignmentRows = await assignmentsQuery;
     if (assignmentRows.error) throw assignmentRows.error;
-    const assignments = assignmentRows.data ?? [];
-    const assignedDivisionIds = new Set(assignments.filter((a: any) => a.user_id === profile.id).map((a: any) => a.division));
+    const currentAssignments = assignmentRows.data ?? [];
+    const rosterQuery = await client.from("competitor_judges")
+      .select("competitor_id,user_id,scoring_type,roster_order,display_name,role_snapshot,expected");
+    if (rosterQuery.error) throw rosterQuery.error;
+    const judgeRoster = (rosterQuery.data ?? []) as NonNullable<import("@/lib/model").Snapshot["judgeRoster"]>;
+    const visibleRoster = fullAccess ? judgeRoster : judgeRoster.filter((row) => row.user_id === profile.id);
+    const assignments = fullAccess
+      ? currentAssignments
+      : (() => {
+          const byDivision = new Map<string, { division: string; slot: number; user_id: string; scoring_type: "technical" | "performance" }>();
+          for (const assignment of currentAssignments as any[]) byDivision.set(assignment.division, assignment);
+          for (const row of visibleRoster) {
+            const competitor = allCompetitors!.find((candidate: any) => candidate.id === row.competitor_id);
+            if (competitor && !byDivision.has(competitor.division)) byDivision.set(competitor.division, {
+              division: competitor.division, slot: row.roster_order, user_id: profile.id, scoring_type: row.scoring_type,
+            });
+          }
+          return [...byDivision.values()];
+        })();
+    const assignedDivisionIds = new Set(visibleRoster
+      .filter((row) => row.user_id === profile.id && row.expected)
+      .map((row) => allCompetitors!.find((competitor: any) => competitor.id === row.competitor_id)?.division)
+      .filter(Boolean));
     const ownCompetitorIds = new Set(submissions.map((s) => s.competitor_id));
     const competitors = fullAccess
       ? allCompetitors!
       : allCompetitors!.filter((c: any) =>
           ownCompetitorIds.has(c.id) || (c.status === "active" && assignedDivisionIds.has(c.division)),
         );
+    const activeCompetitor = allCompetitors!.find((competitor: any) => competitor.status === "active" && !competitor.archived);
+    let scoringWindow: unknown = null;
+    if (activeCompetitor) {
+      const issued = await client.rpc("issue_scoring_window", { p_user: profile.id, p_competitor: activeCompetitor.id });
+      if (issued.error) throw issued.error;
+      scoringWindow = issued.data;
+    }
     const result: Record<string, unknown> = {
       divisions: divisionRows.data?.map((d) => d.name),
       profile: ownProfile,
@@ -90,6 +122,7 @@ export async function GET(req: Request) {
         };
       }),
       assignments,
+      scoringWindow,
     };
     if (fullAccess) {
       const { data: audit } = await client
@@ -116,7 +149,8 @@ export async function GET(req: Request) {
     }
     if (fullAccess) {
       if (revealPoints)
-        result.rankings = rankGlobal(allCompetitors!, submissions, scoringConfiguration.rules, assignments);
+        result.rankings = rankGlobal(allCompetitors!, submissions, scoringConfiguration.rules, assignments, judgeRoster);
+      result.judgeRoster = judgeRoster;
       result.competitors = allCompetitors;
       let roster: any = await client
         .from("profiles")

@@ -39,7 +39,7 @@ import {
 import { api, ApiResponseError, demo, supabase } from "@/lib/supabase";
 import { PasswordField } from "@/app/components/password-field";
 import { profilePasswordError } from "@/lib/password-validation";
-import { applyLocal, clearLocal, LocalWorkspace, mergeRemoteSnapshotPreservingQueue, readLocal, sanitizeWorkspace, writeLocal } from "@/lib/local";
+import { applyLocal, clearLocal, LocalWorkspace, mergeRemoteSnapshotPreservingQueue, readLocal, rebaseQueuedOperationsToOpenWindow, sanitizeWorkspace, writeLocal } from "@/lib/local";
 import {
   categories,
   Competitor,
@@ -328,17 +328,32 @@ export default function Page() {
   const active = state?.competitors.find(
     (c) => c.status === "active" && !c.archived,
   );
+  const canReconcilePendingWindow = !!profile && isAssignedJudge(profile) &&
+    !!workspace?.queue.length && !!active &&
+    state?.scoringWindow?.competitor_id === active.id &&
+    workspace.queue.every((operation) => operation.competitor_id === active.id) &&
+    workspace.queue.some((operation) => operation.scoring_window_revision !== state.scoringWindow?.revision ||
+      operation.scoring_window_token !== state.scoringWindow?.token);
   const current = state?.competitors.find(
     (c) => c.id === (selected ?? active?.id),
   );
+  const currentRosterAssignment = state?.judgeRoster?.find((row) =>
+    row.competitor_id === current?.id && row.user_id === profile?.id && row.expected,
+  );
   const currentAssignment = state?.assignments?.find(
     (assignment) => assignment.division === current?.division && assignment.user_id === profile?.id,
-  );
+  ) ?? (currentRosterAssignment ? {
+    division: current?.division ?? "", slot: currentRosterAssignment.roster_order,
+    user_id: currentRosterAssignment.user_id, scoring_type: currentRosterAssignment.scoring_type,
+  } : undefined);
   const technical = server
     ? tab !== "Performance"
     : assignmentScoringType(currentAssignment, profile) === "technical";
-  const currentRoleAssignments = (state?.assignments ?? [])
-    .filter((assignment) => assignment.division === current?.division && assignmentScoringType(assignment, state?.profiles?.find((judge) => judge.id === assignment.user_id)) === (tab === "Performance" ? "performance" : "technical"))
+  const currentJudgeRoster = state?.judgeRoster?.filter((row) => row.competitor_id === current?.id && row.expected);
+  const currentRoleAssignments = (currentJudgeRoster
+    ? currentJudgeRoster.map((row) => ({ division: current?.division ?? "", slot: row.roster_order, user_id: row.user_id, scoring_type: row.scoring_type, display_name: row.display_name }))
+    : (state?.assignments ?? []).filter((assignment) => assignment.division === current?.division).map((assignment) => ({ ...assignment, display_name: undefined as string | undefined })))
+    .filter((assignment) => assignmentScoringType(assignment, state?.profiles?.find((judge) => judge.id === assignment.user_id)) === (tab === "Performance" ? "performance" : "technical"))
     .sort((a, b) => a.slot - b.slot);
   const selectedJudgeId = server
     ? (tab === "Performance" ? performanceViewJudgeId : technicalViewJudgeId)
@@ -352,7 +367,7 @@ export default function Page() {
   const displayed = state?.submissions.find(
     (s) =>
       s.competitor_id === current?.id &&
-      s.user_id === viewingJudgeId,
+      (s.user_id === viewingJudgeId || s.historical_user_id === viewingJudgeId),
   );
   const visibleSubmissions =
     profile && state ? detailSubmissions(profile, state.submissions) : [];
@@ -366,6 +381,8 @@ export default function Page() {
     !!currentAssignment &&
     assignmentScoringType(currentAssignment, profile) === (tab === "Performance" ? "performance" : "technical") &&
     !!current &&
+    (demo || (state?.scoringWindow?.competitor_id === current.id &&
+      !!state.scoringWindow.revision && !!state.scoringWindow.token)) &&
     !current.archived &&
     current.status === "active" &&
     !submissionSubmitted;
@@ -388,6 +405,7 @@ export default function Page() {
   const divisionAssignments = (state?.assignments ?? []).filter(
     (a) => a.division === assignmentDivision,
   );
+  const assignmentLocked = (state?.competitors ?? []).some((competitor) => competitor.division === assignmentDivision);
   const divisionProfiles = (state?.profiles ?? []).filter(
     (p) => p.active && !p.archived,
   );
@@ -401,6 +419,13 @@ export default function Page() {
   const editableAssignmentRows = Object.entries(editableAssignments)
     .map(([slot, row]) => ({ slot: Number(slot), ...row }))
     .sort((a, b) => a.slot - b.slot);
+  const competitorDraftRoster = (state?.assignments ?? []).filter(
+    (assignment) => assignment.division === competitorEdit?.division,
+  );
+  const competitorDraftRosterValid = competitorDraftRoster.length >= 2 &&
+    competitorDraftRoster.length <= 10 &&
+    competitorDraftRoster.some((assignment) => assignment.scoring_type === "technical") &&
+    competitorDraftRoster.some((assignment) => assignment.scoring_type === "performance");
   const nextUpcoming = [...(state?.competitors ?? [])]
     .filter((c) => c.status === "upcoming" && !c.archived)
     .sort((a, b) => a.position - b.position)[0];
@@ -411,19 +436,21 @@ export default function Page() {
     .filter((c) => !c.archived)
     .sort((a, b) => a.position - b.position)
     .map((competitor) => {
-      const judges = (state?.assignments ?? [])
-        .filter((assignment) => assignment.division === competitor.division)
-        .sort((a, b) => a.slot - b.slot);
+      const official = state?.judgeRoster?.filter((judge) => judge.competitor_id === competitor.id && judge.expected);
+      const judges = official
+        ? official.map((judge) => ({ division: competitor.division, slot: judge.roster_order, user_id: judge.user_id, scoring_type: judge.scoring_type, display_name: judge.display_name }))
+        : (state?.assignments ?? []).filter((assignment) => assignment.division === competitor.division);
+      judges.sort((a, b) => a.slot - b.slot);
       const entries = judges.map((judge) => {
         const judgeProfile = state?.profiles?.find((p) => p.id === judge.user_id);
         const scoringType = assignmentScoringType(judge, judgeProfile);
         const submission = state?.submissions.find(
-          (s) => s.competitor_id === competitor.id && s.user_id === judge.user_id &&
+          (s) => s.competitor_id === competitor.id && (s.user_id === judge.user_id || s.historical_user_id === judge.user_id) &&
             (s.scoring_type ?? (s.slot > 3 ? "performance" : "technical")) === scoringType,
         );
         return {
           ...judge,
-          name: judgeProfile?.name ?? "Former judge",
+          name: judgeProfile?.name ?? ("display_name" in judge && typeof judge.display_name === "string" ? judge.display_name : "Former judge"),
           scoring_type: scoringType,
           status: submission?.finished
             ? "Submitted"
@@ -492,6 +519,26 @@ export default function Page() {
               ...next.snapshot.profile,
               appearance_preferences: previousPending.preferences,
               appearance_updated_at: previousPending.updatedAt,
+            },
+          },
+        };
+      }
+    }
+    const previousHotkeyPending = previousWorkspace?.snapshot.profile.id === next.snapshot.profile.id
+      ? previousWorkspace.hotkeysPending
+      : undefined;
+    if (next.hotkeysPending === undefined && previousHotkeyPending) {
+      const serverUpdatedAt = Date.parse(next.snapshot.profile.hotkeys_updated_at ?? "1970-01-01T00:00:00.000Z");
+      if (Date.parse(previousHotkeyPending.updatedAt) > serverUpdatedAt) {
+        next = {
+          ...next,
+          hotkeysPending: previousHotkeyPending,
+          snapshot: {
+            ...next.snapshot,
+            profile: {
+              ...next.snapshot.profile,
+              hotkey_preferences: previousHotkeyPending.preferences,
+              hotkeys_updated_at: previousHotkeyPending.updatedAt,
             },
           },
         };
@@ -585,6 +632,44 @@ export default function Page() {
       appearanceSyncBusy.current = false;
     }
   }, [commit]);
+  const hotkeySyncBusy = useRef(false);
+  const syncHotkeys = useCallback(async () => {
+    if (demo || !navigator.onLine || hotkeySyncBusy.current) return;
+    const before = ref.current;
+    const pending = before?.hotkeysPending;
+    if (!before || !pending) return;
+    hotkeySyncBusy.current = true;
+    try {
+      const result = await api("profile/hotkeys", {
+        preferences: pending.preferences,
+        updatedAt: pending.updatedAt,
+      }, { method: "PATCH" }) as {
+        preferences: { enabled: boolean; keys: Record<string, string> };
+        updatedAt: string;
+        saved: boolean;
+        conflict: boolean;
+      };
+      const current = ref.current;
+      if (!current || current.snapshot.profile.id !== before.snapshot.profile.id || current.hotkeysPending?.updatedAt !== pending.updatedAt) return;
+      await commit({
+        ...current,
+        hotkeysPending: null,
+        snapshot: { ...current.snapshot, profile: {
+          ...current.snapshot.profile,
+          hotkey_preferences: result.preferences,
+          hotkeys_updated_at: result.updatedAt,
+        } },
+      });
+      setHotkeys({ ...defaultKeys, ...result.preferences.keys });
+      setKeysEnabled(result.preferences.enabled);
+      if (result.conflict) setNotice("Newer hotkey settings saved on another device were applied.");
+      setSyncError("");
+    } catch (error) {
+      setSyncError(`Hotkey sync failed: ${(error as Error).message}`);
+    } finally {
+      hotkeySyncBusy.current = false;
+    }
+  }, [commit]);
   const fetchState = useCallback(
     () =>
       api(
@@ -645,9 +730,15 @@ export default function Page() {
     busy.current = true;
     setSyncing(true);
     try {
+      const serverVersions = new Map<string, number>();
       while (ref.current?.queue.length) {
         const entry = ref.current.queue[0];
-        const result = await api("sync", entry);
+        const expectedVersion = serverVersions.get(entry.competitor_id);
+        const result = await api("sync", expectedVersion === undefined
+          ? entry
+          : { ...entry, expected_version: expectedVersion });
+        if (Number.isInteger(result.version))
+          serverVersions.set(entry.competitor_id, Number(result.version));
         const clientRevision = entry.scoring_config_revision ?? ref.current?.snapshot.scoringConfigRevision ?? 1;
         if (Number(result.scoringConfigRevision) > clientRevision) {
           setScoringReconciliationNotice(
@@ -676,6 +767,37 @@ export default function Page() {
       setSyncing(false);
     }
   }, [commit, fetchState]);
+  const reconcilePendingOfflineWork = useCallback(async () => {
+    try {
+      if (demo || !navigator.onLine) throw new Error("Reconnect before reconciling saved work.");
+      const latest = ref.current;
+      if (!latest?.queue.length) throw new Error("There is no saved work to reconcile.");
+      const remote: Snapshot = await fetchState();
+      const activeCompetitor = remote.competitors.find((competitor) => competitor.status === "active" && !competitor.archived);
+      const scoringWindow = remote.scoringWindow;
+      if (!activeCompetitor || scoringWindow?.competitor_id !== activeCompetitor.id || !scoringWindow.token || !scoringWindow.revision)
+        throw new Error("The organizer has not reopened the queued competitor. Your saved work remains on this device.");
+      if (!latest.queue.every((operation) => operation.competitor_id === activeCompetitor.id))
+        throw new Error("This device has queued work for another competitor. Download a local backup and ask the organizer to reconcile it.");
+      const submissionVersion = remote.submissions.find((submission) =>
+        submission.competitor_id === activeCompetitor.id && submission.user_id === remote.profile.id)?.version ?? 0;
+      const expectedVersion = submissionVersion;
+      const queue = rebaseQueuedOperationsToOpenWindow(
+        latest.queue,
+        activeCompetitor.id,
+        { revision: scoringWindow.revision, token: scoringWindow.token },
+        expectedVersion,
+      );
+      if (!queue) throw new Error("Saved work includes another competitor and was left unchanged. Download a local backup and ask the organizer to reconcile it.");
+      await commit({ ...mergeRemoteSnapshotPreservingQueue({ ...latest, queue }, remote), queue });
+      setSyncError("");
+      setNotice("Saved work is queued for the reopened competitor.");
+      await sync();
+      await refresh();
+    } catch (error) {
+      setSyncError((error as Error).message);
+    }
+  }, [commit, demo, fetchState, refresh, sync]);
   useEffect(() => {
     // Use the event default until this account's saved settings load.
     const preference: AppearancePreferences["mode"] = "light";
@@ -688,11 +810,6 @@ export default function Page() {
       applyAppearance(initialAppearance, effective);
     };
     applyPreference();
-    try {
-      const k = localStorage.getItem("hidc-hotkeys");
-      if (k) setHotkeys({ ...defaultKeys, ...JSON.parse(k) });
-    } catch {}
-    setKeysEnabled(localStorage.getItem("hidc-keys-enabled") !== "false");
     if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator)
       void navigator.serviceWorker.register("/sw.js");
     setOnline(navigator.onLine);
@@ -760,8 +877,17 @@ export default function Page() {
     profile?.appearance_preferences?.sidebarCollapsed,
   ]);
   useEffect(() => {
+    if (!profile) return;
+    const preferences = profile.hotkey_preferences;
+    setHotkeys({ ...defaultKeys, ...(preferences?.keys ?? {}) });
+    setKeysEnabled(preferences?.enabled ?? true);
+  }, [profile?.id, profile?.hotkeys_updated_at, profile?.hotkey_preferences]);
+  useEffect(() => {
     if (online && workspace?.appearancePending) void syncAppearance();
   }, [online, workspace?.snapshot.profile.id, workspace?.appearancePending?.updatedAt, syncAppearance]);
+  useEffect(() => {
+    if (online && workspace?.hotkeysPending) void syncHotkeys();
+  }, [online, workspace?.snapshot.profile.id, workspace?.hotkeysPending?.updatedAt, syncHotkeys]);
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
@@ -790,6 +916,12 @@ export default function Page() {
       // Retry action can still make one explicit check.
       if (syncError.startsWith("Sign-in required.")) return;
       if (ref.current?.queue.length) {
+        if (syncError.startsWith("Scoring window closed.")) {
+          // Keep the outbox untouched and check only for an Organizer reopen.
+          // Do not retry the same stale authorization every poll interval.
+          void refresh();
+          return;
+        }
         // Drain queued work first where possible, then merge a fresh snapshot
         // underneath any actions that still remain queued.
         void sync().then(() => refresh());
@@ -804,6 +936,7 @@ export default function Page() {
     const timer = setInterval(() => {
       revalidate();
       void syncAppearance();
+      void syncHotkeys();
     }, 10000);
     revalidate();
     void syncAppearance();
@@ -811,11 +944,6 @@ export default function Page() {
       !demo && supabase
         ? supabase
             .channel("roster")
-            .on(
-              "postgres_changes",
-              { event: "*", schema: "public", table: "competitors" },
-              () => void refresh(),
-            )
             .on(
               "postgres_changes",
               { event: "UPDATE", schema: "public", table: "live_signal" },
@@ -835,7 +963,7 @@ export default function Page() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       if (channel) void supabase?.removeChannel(channel);
     };
-  }, [ready, state?.profile.id, online, sync, refresh, syncAppearance, syncError]);
+  }, [ready, state?.profile.id, online, sync, refresh, syncAppearance, syncHotkeys, syncError]);
   useEffect(() => {
     if (refreshQueued && !syncing && !refreshingCompetitor && online) {
       void refresh();
@@ -882,7 +1010,13 @@ export default function Page() {
           kind,
           payload,
           scoring_config_revision: latest.snapshot.scoringConfigRevision ?? 1,
+          scoring_window_revision: latest.snapshot.scoringWindow?.competitor_id === competitorId
+            ? latest.snapshot.scoringWindow.revision : undefined,
+          scoring_window_token: latest.snapshot.scoringWindow?.competitor_id === competitorId
+            ? latest.snapshot.scoringWindow.token : undefined,
         };
+        if (!demo && (!op.scoring_window_revision || !op.scoring_window_token))
+          throw new Error("The scoring window has not synced yet. Keep this page open and retry after the active competitor refreshes.");
         const snapshot = applyLocal(latest.snapshot, op);
         await commit({ snapshot, queue: demo ? [] : [...latest.queue, op] });
         setNotice(
@@ -914,7 +1048,8 @@ export default function Page() {
     setExecution("E0");
     setFeatures([]);
     setEditing(null);
-  }, [active?.id]);
+    if (!server) setSelected(active?.id ?? null);
+  }, [active?.id, server]);
   const clear = () => {
     setTrick("");
     setLevel(1);
@@ -1096,6 +1231,53 @@ export default function Page() {
     if (result.conflict) setNotice("A newer appearance saved on another device was kept.");
     return result;
   }
+  async function saveHotkeyPreferences() {
+    if (!profile || !ref.current) return;
+    const values = Object.values(hotkeys).map((value) => value.trim().toLowerCase()).filter(Boolean);
+    if (new Set(values).size !== values.length) {
+      setSyncError("Hotkeys must be unique. Resolve duplicate bindings before saving.");
+      return;
+    }
+    const previous = Date.parse(profile.hotkeys_updated_at ?? "1970-01-01T00:00:00.000Z");
+    const updatedAt = new Date(Math.max(Date.now(), previous + 1)).toISOString();
+    const preferences = { enabled: keysEnabled, keys: { ...hotkeys } };
+    try {
+      let savedPreferences = preferences;
+      let savedAt = updatedAt;
+      let conflict = false;
+      if (!demo && online) {
+        const result = await api("profile/hotkeys", { preferences, updatedAt }, { method: "PATCH" }) as {
+          preferences: typeof preferences; updatedAt: string; conflict: boolean;
+        };
+        savedPreferences = result.preferences;
+        savedAt = result.updatedAt;
+        conflict = result.conflict;
+      }
+      const latest = ref.current;
+      if (!latest || latest.snapshot.profile.id !== profile.id)
+        throw new Error("Your signed-in account changed before the hotkeys could be saved.");
+      await commit({
+        ...latest,
+        hotkeysPending: !demo && !online ? { preferences, updatedAt } : null,
+        snapshot: { ...latest.snapshot, profile: {
+          ...latest.snapshot.profile,
+          hotkey_preferences: savedPreferences,
+          hotkeys_updated_at: savedAt,
+        } },
+      });
+      setHotkeys({ ...defaultKeys, ...savedPreferences.keys });
+      setKeysEnabled(savedPreferences.enabled);
+      setNotice(conflict
+        ? "Newer hotkey settings saved on another device were applied."
+        : !online && !demo
+          ? "Hotkeys saved locally and will sync when the connection returns."
+          : "Hotkeys saved to your judge profile.");
+      setSyncError("");
+    } catch (error) {
+      setSyncError(`Hotkey settings could not be saved: ${(error as Error).message}`);
+    }
+  }
+
   async function saveProfileSettings(e: React.FormEvent) {
     e.preventDefault();
     if (!profile || !workspace) return;
@@ -1365,7 +1547,7 @@ export default function Page() {
             ...(next.snapshot.assignments ?? []).filter((row) => row.division !== assignment.division),
             ...assignment.assignments.map((row) => ({ ...row, division: assignment.division })),
           ];
-        } else if (["user", "remove_user", "reactivate_user"].includes(action))
+        } else if (["user", "remove_user"].includes(action))
           throw new Error(
             "Account changes require a connected Supabase project.",
           );
@@ -1373,8 +1555,10 @@ export default function Page() {
       } else {
         const result = await api("manage", { action, data });
         if (action === "remove_user") {
-          setNotice((result as { archived?: boolean })?.archived ? "Account archived; score history was preserved." : "Account deleted.");
-        } else if (action === "reactivate_user") setNotice("Account reactivated. Assign it to divisions as needed.");
+          setNotice((result as { submittedScoresPreserved?: boolean })?.submittedScoresPreserved
+            ? "Account permanently deleted. Submitted scores were preserved for authorized event records."
+            : "Account and login permanently deleted.");
+        } else if (action === "reactivate_user") setNotice("Legacy archived account reactivated.");
         else setNotice(action === "user" ? "Account saved." : action === "assignments" ? "Division assignments saved." : action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
         await refresh();
       }
@@ -1683,6 +1867,18 @@ export default function Page() {
           >
             Retry Sync
           </button>
+          {canReconcilePendingWindow && (
+            <button
+              onClick={() => setModal({
+                title: "Reconcile Saved Work?",
+                body: `The organizer reopened ${active?.name ?? "this competitor"}. Re-apply this device’s pending actions to the currently open scoring window? The server will assign receipt times; local device timestamps are not proof of when an action happened. Only proceed if this saved work is the judge’s intended score for the reopened competitor.`,
+                confirmLabel: "Reconcile and Sync",
+                action: () => void reconcilePendingOfflineWork(),
+              })}
+            >
+              Reconcile Reopened Score
+            </button>
+          )}
           <button
             onClick={() =>
               download(
@@ -1802,7 +1998,7 @@ export default function Page() {
                     >
                       {currentRoleAssignments.map((assignment) => (
                           <option value={assignment.user_id} key={assignment.user_id}>
-                            {state?.profiles?.find((candidate) => candidate.id === assignment.user_id)?.name ?? "Former judge"}
+                            {state?.profiles?.find((candidate) => candidate.id === assignment.user_id)?.name ?? assignment.display_name ?? "Former judge"}
                           </option>
                         ))}
                     </select>
@@ -2476,7 +2672,7 @@ export default function Page() {
                         ?.name
                     }
                   </span>
-                  <span>{s.scoring_type === "performance" || (s.scoring_type === undefined && s.slot > 3) ? "Performance" : "Technical"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? (s.user_id === profile?.id ? profile.name : "Former judge")}</span>
+                  <span>{s.scoring_type === "performance" || (s.scoring_type === undefined && s.slot > 3) ? "Performance" : "Technical"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? (s.user_id === profile?.id ? profile.name : s.judge_name_snapshot ?? "Deleted Judge")}</span>
                   <span>
                     {s.finished ? "Submitted" : "Draft"}
                     {s.dq ? " · DQ" : ""}
@@ -2487,29 +2683,31 @@ export default function Page() {
                 </summary>
                 {server && (
                   <div className="row-actions">
-                    <button
+                    {!s.finished && <button
                       disabled={demo}
-                      onClick={() =>
+                      onClick={() => setModal({
+                        title: "Mark this submission submitted?",
+                        body: "This change is recorded in the audit log.",
+                        action: () => {
+                          void api("review", { id: s.id, version: s.version, finished: true, dq: s.dq })
+                            .then(refresh).catch((e) => setSyncError(e.message));
+                        },
+                      })}
+                    >Mark submitted</button>}
+                    {s.finished && <button
+                      disabled={demo}
+                      onClick={() => {
+                        const competitor = state.competitors.find((row) => row.id === s.competitor_id);
+                        const previous = state.competitors.find((row) => row.status === "active" && row.id !== s.competitor_id);
                         setModal({
-                          title: s.finished
-                            ? "Reopen this submission?"
-                            : "Mark this submission submitted?",
-                          body: "This change is recorded in the audit log.",
-                          action: () => {
-                            void api("review", {
-                              id: s.id,
-                              version: s.version,
-                              finished: !s.finished,
-                              dq: s.dq,
-                            })
-                              .then(refresh)
-                              .catch((e) => setSyncError(e.message));
-                          },
-                        })
-                      }
-                    >
-                      {s.finished ? "Reopen submission" : "Mark submitted"}
-                    </button>
+                          title: `Reopen ${competitor?.name ?? "competitor"} for Everyone?`,
+                          body: `${previous ? `${previous.name} will be locked. ` : ""}This changes the active scoring target for every judge assigned to ${competitor?.division ?? "this division"}. All their saved work stays intact; submitted judges can edit after the shared reopen.`,
+                          action: () => void manage("activate", { id: s.competitor_id }),
+                          confirmLabel: "Reopen for Everyone",
+                          danger: true,
+                        });
+                      }}
+                    >Reopen Competitor for Everyone</button>}
                     <button
                       disabled={demo}
                       onClick={() =>
@@ -2792,6 +2990,7 @@ export default function Page() {
                 </div>
               </div>
               <p>Normally assign 3 Technical Judges and 2 Performance Judges. Each division has its own group; judges may serve in multiple divisions. Organizers count only when explicitly assigned.</p>
+              {assignmentLocked ? <p className="info-note" role="status">This division’s official roster is locked because competitors already exist in it.</p> : null}
               {divisionFormOpen && (
                 <form className="division-add-form" onSubmit={addDivision}>
                   <label>
@@ -2822,7 +3021,7 @@ export default function Page() {
                       <b>{scoring_type === "technical" ? "Technical Judge" : "Performance Judge"}</b>
                       <label>
                         Scoring group
-                        <select value={scoring_type} onChange={(event) => {
+                        <select disabled={assignmentLocked} value={scoring_type} onChange={(event) => {
                           const nextType = event.target.value as ScoringType;
                           const assignedProfile = divisionProfiles.find((candidate) => candidate.id === user_id);
                           updateRow({ scoring_type: nextType, user_id: assignedProfile && profileCanScoreType(assignedProfile, nextType) ? user_id : "" });
@@ -2833,7 +3032,7 @@ export default function Page() {
                       </label>
                       <label>
                         Judge account
-                        <select value={user_id} onChange={(event) => updateRow({ user_id: event.target.value })}>
+                        <select disabled={assignmentLocked} value={user_id} onChange={(event) => updateRow({ user_id: event.target.value })}>
                           <option value="">Select assigned judge</option>
                           {divisionProfiles.filter((p) => profileCanScoreType(p, scoring_type)).map((p) => (
                             <option key={p.id} value={p.id} disabled={usedElsewhere.has(p.id)}>
@@ -2842,7 +3041,7 @@ export default function Page() {
                           ))}
                         </select>
                       </label>
-                      <button type="button" aria-label="Remove assignment" title="Remove assignment" onClick={() => {
+                      <button type="button" disabled={assignmentLocked} aria-label="Remove assignment" title="Remove assignment" onClick={() => {
                         const remaining = editableAssignmentRows.filter((row) => row.slot !== slot);
                         setAssignmentDraft(Object.fromEntries(remaining.map((row, index) => [String(index + 1), { user_id: row.user_id, scoring_type: row.scoring_type }])));
                       }}><Trash2 size={14} /> Remove</button>
@@ -2850,7 +3049,7 @@ export default function Page() {
                   );
                 })}
                 <div className="assignment-editor-actions">
-                  <button type="button" disabled={editableAssignmentRows.length >= 10} onClick={() => {
+                  <button type="button" disabled={assignmentLocked || editableAssignmentRows.length >= 10} onClick={() => {
                     const nextSlot = editableAssignmentRows.length + 1;
                     const techCount = editableAssignmentRows.filter((row) => row.scoring_type === "technical").length;
                     const performanceCount = editableAssignmentRows.filter((row) => row.scoring_type === "performance").length;
@@ -2860,7 +3059,7 @@ export default function Page() {
                   <button
                     className="primary"
                     disabled={
-                      editableAssignmentRows.length < 2 || editableAssignmentRows.length > 10 ||
+                      assignmentLocked || editableAssignmentRows.length < 2 || editableAssignmentRows.length > 10 ||
                       editableAssignmentRows.some((row) => !row.user_id) ||
                       new Set(editableAssignmentRows.map((row) => row.user_id)).size !== editableAssignmentRows.length ||
                       !editableAssignmentRows.some((row) => row.scoring_type === "technical") ||
@@ -3011,15 +3210,20 @@ export default function Page() {
                                   (c.status === "locked" && !state.submissions.some((s) => s.competitor_id === c.id))
                                 }
                                 onClick={() =>
-                                  setModal({
-                                    title: `Activate ${c.name}?`,
-                                    body: "This switches the shared active competitor for every judge.",
-                                    action: () =>
-                                      void manage("activate", { id: c.id }),
-                                  })
+                                  (() => {
+                                    const previous = state.competitors.find((row) => row.status === "active" && row.id !== c.id);
+                                    const reopening = c.status === "locked";
+                                    setModal({
+                                      title: reopening ? `Reopen ${c.name} for Everyone?` : `Activate ${c.name}?`,
+                                      body: `${previous ? `${previous.name} will be locked. ` : ""}This switches the shared active competitor for every judge assigned to ${c.division}. ${reopening ? "Submitted scores will unlock for those judges; their saved work stays intact." : ""}`,
+                                      action: () => void manage("activate", { id: c.id }),
+                                      confirmLabel: reopening ? "Reopen for Everyone" : "Activate Competitor",
+                                      danger: reopening,
+                                    });
+                                  })()
                                 }
                               >
-                                Activate
+                                {c.status === "locked" ? "Reopen for Everyone" : "Activate"}
                               </button>
                             </div>
                           </td>
@@ -3118,28 +3322,24 @@ export default function Page() {
                             .sort()[0] ?? "9999",
                         ),
                   )
-                  .map((r) => ({
-                    Rank: r.rank,
-                    Competitor: r.competitor.name,
-                    Division: r.competitor.division,
-                    Order: r.competitor.position,
-                    ...Object.fromEntries(r.technical.map((value, index) => {
-                      const assigned = (state.assignments ?? []).filter((assignment) => assignment.division === r.competitor.division && assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "technical").sort((a, b) => a.slot - b.slot)[index];
-                      const judge = state.profiles?.find((candidate) => candidate.id === assigned?.user_id);
-                      return [`Technical · ${judge?.name ?? "Former judge"}`, value];
-                    })),
-                    ...Object.fromEntries(r.performance.map((value, index) => {
-                      const assigned = (state.assignments ?? []).filter((assignment) => assignment.division === r.competitor.division && assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "performance").sort((a, b) => a.slot - b.slot)[index];
-                      const judge = state.profiles?.find((candidate) => candidate.id === assigned?.user_id);
-                      return [`Performance · ${judge?.name ?? "Former judge"}`, value];
-                    })),
-                    Raw: r.raw,
-                    Scaled: r.scaled,
-                    Performance: r.average,
-                    Final: r.final,
-                    Complete: r.complete,
-                    DQ: r.dq,
-                  }));
+                  .map((r) => {
+                    const technicalJudges = (r.judges ?? []).filter((judge) => judge.scoring_type === "technical");
+                    const performanceJudges = (r.judges ?? []).filter((judge) => judge.scoring_type === "performance");
+                    return {
+                      Rank: r.rank,
+                      Competitor: r.competitor.name,
+                      Division: r.competitor.division,
+                      Order: r.competitor.position,
+                      ...Object.fromEntries(technicalJudges.map((judge, index) => [`Technical · ${judge.display_name}`, r.technical[index]])),
+                      ...Object.fromEntries(performanceJudges.map((judge, index) => [`Performance · ${judge.display_name}`, r.performance[index]])),
+                      Raw: r.raw,
+                      Scaled: r.scaled,
+                      Performance: r.average,
+                      Final: r.final,
+                      Complete: r.complete,
+                      DQ: r.dq,
+                    };
+                  });
                 download(
                   rows,
                   format,
@@ -3152,12 +3352,26 @@ export default function Page() {
               {allDivisions
                 .filter((d) => d !== "Exhibition")
                 .map((d) => {
-                  const divisionJudges = (state.assignments ?? []).filter((assignment) => assignment.division === d);
-                  const divisionTechAssignments = divisionJudges.filter((assignment) => assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "technical").sort((a, b) => a.slot - b.slot);
-                  const divisionPerformanceAssignments = divisionJudges.filter((assignment) => assignmentScoringType(assignment, state.profiles?.find((judge) => judge.id === assignment.user_id)) === "performance").sort((a, b) => a.slot - b.slot);
-                  const technicalJudgeCount = divisionTechAssignments.length;
-                  const performanceJudgeCount = divisionPerformanceAssignments.length;
-                  const scoreColumnCount = technicalJudgeCount + performanceJudgeCount + 4;
+                  const divisionCompetitors = state.competitors.filter((competitor) => competitor.division === d);
+                  const competitorIds = new Set(divisionCompetitors.map((competitor) => competitor.id));
+                  const judgeColumns = new Map<string, { user_id: string; scoring_type: ScoringType; roster_order: number; display_name: string }>();
+                  for (const judge of state.judgeRoster ?? []) {
+                    if (competitorIds.has(judge.competitor_id) && judge.expected) {
+                      const key = `${judge.scoring_type}:${judge.user_id}`;
+                      if (!judgeColumns.has(key)) judgeColumns.set(key, {
+                        user_id: judge.user_id, scoring_type: judge.scoring_type,
+                        roster_order: judge.roster_order,
+                        display_name: state.profiles?.find((candidate) => candidate.id === judge.user_id)?.name ?? judge.display_name,
+                      });
+                    }
+                  }
+                  const columns = [...judgeColumns.values()].sort((a, b) =>
+                    a.scoring_type === b.scoring_type
+                      ? a.roster_order - b.roster_order
+                      : a.scoring_type === "technical" ? -1 : 1,
+                  );
+                  const divisionRankings = (state.rankings ?? []).filter((ranking) => ranking.competitor.division === d);
+                  const scoreColumnCount = columns.length + 4;
                   return (
                   <div key={d}>
                     <h3 className="division-title">{d}</h3>
@@ -3168,8 +3382,7 @@ export default function Page() {
                             {[
                               "Rank",
                               "Competitor",
-                              ...divisionTechAssignments.map((assignment) => state.profiles?.find((judge) => judge.id === assignment.user_id)?.name ?? "Former judge"),
-                              ...divisionPerformanceAssignments.map((assignment) => state.profiles?.find((judge) => judge.id === assignment.user_id)?.name ?? "Former judge"),
+                              ...columns.map((judge) => `${judge.scoring_type === "technical" ? "T" : "P"} · ${judge.display_name}`),
                               "Raw tech",
                               "Scaled /70",
                               "Avg /30",
@@ -3182,15 +3395,15 @@ export default function Page() {
                         </thead>
                         <tbody>
                           {canViewPoints
-                            ? state.rankings
-                                ?.filter((r) => r.competitor.division === d)
-                                .map((r) => (
+                            ? divisionRankings.map((r) => {
+                              const technicalValues = new Map((r.judges ?? []).filter((judge) => judge.scoring_type === "technical").map((judge, index) => [judge.user_id, r.technical[index]]));
+                              const performanceValues = new Map((r.judges ?? []).filter((judge) => judge.scoring_type === "performance").map((judge, index) => [judge.user_id, r.performance[index]]));
+                              return (
                               <tr key={r.competitor.id}>
                                 <td>{r.rank ?? "—"}</td>
                                 <td>{r.competitor.name}</td>
                                 {[
-                                  ...r.technical,
-                                  ...r.performance,
+                                  ...columns.map((judge) => judge.scoring_type === "technical" ? technicalValues.get(judge.user_id) ?? null : performanceValues.get(judge.user_id) ?? null),
                                   r.raw,
                                   r.scaled,
                                   r.average,
@@ -3206,7 +3419,8 @@ export default function Page() {
                                       : "Pending"}
                                 </td>
                               </tr>
-                                ))
+                              );
+                            })
                             : state.competitors
                                 .filter((competitor) => competitor.division === d)
                                 .sort((a, b) => a.position - b.position)
@@ -3310,7 +3524,6 @@ export default function Page() {
                 <p className="settings-section-help">Shortcuts are pressed in sequence within 0.9 seconds and pause while typing in a field.</p>
                 <label className="checkbox"><input type="checkbox" checked={keysEnabled} onChange={(event) => {
                   setKeysEnabled(event.target.checked);
-                  localStorage.setItem("hidc-keys-enabled", String(event.target.checked));
                 }} /> Enable keyboard shortcuts</label>
                 <div className="hotkey-list">
                   {Object.entries(hotkeys).map(([action, key]) => <label key={action}>
@@ -3320,15 +3533,7 @@ export default function Page() {
                 </div>
                 <div className="settings-section-actions">
                   <button type="button" onClick={() => setHotkeys(defaultKeys)}>Reset Defaults</button>
-                  <button type="button" className="primary" onClick={() => {
-                    const values = Object.values(hotkeys).filter(Boolean);
-                    if (new Set(values).size !== values.length) {
-                      setSyncError("Hotkeys must be unique. Resolve duplicate bindings before saving.");
-                      return;
-                    }
-                    localStorage.setItem("hidc-hotkeys", JSON.stringify(hotkeys));
-                    setNotice("Hotkeys saved on this laptop.");
-                  }}>Save Hotkeys</button>
+                  <button type="button" className="primary" onClick={() => void saveHotkeyPreferences()}>Save Hotkeys</button>
                 </div>
               </div>
             </section>
@@ -3395,21 +3600,21 @@ export default function Page() {
           {(() => {
             const target = accountDeleteTarget;
             const hasHistory = accountHasScoreHistory(target.id);
-            const confirmed = accountDeleteConfirmation === target.username;
+            const confirmed = accountDeleteConfirmation === target.username || accountDeleteConfirmation === "DELETE JUDGE";
             return <>
               <p className="danger-warning">Account: <b>{target.username}</b><br />Role: <b>{profileRoleLabel(target, profileScoringType(target))}</b></p>
               <p className="account-delete-impact" role="alert">
                 {hasHistory
-                  ? "This account has saved scoring history. Delete will archive it, immediately block future sign-in, remove future division assignments, and preserve every score and audit record. Organizers can reactivate it later."
+                  ? "This permanently removes the judge’s login and profile. Existing submitted scores will be preserved for event records and visible only to authorized organizers. Unsubmitted work will not count toward future completion."
                   : "No score history was found. Delete will permanently remove the account profile and sign-in, plus any empty assignment placeholders. This cannot be undone."}
               </p>
               <label>
-                Type <b>{target.username}</b> to confirm
+                Type <b>{target.username}</b> or <b>DELETE JUDGE</b> to confirm
                 <input value={accountDeleteConfirmation} onChange={(event) => setAccountDeleteConfirmation(event.target.value)} autoComplete="off" />
               </label>
               <div className="dialog-actions">
                 <button type="button" onClick={() => { setAccountDeleteTarget(null); setAccountDeleteConfirmation(""); }}>Cancel</button>
-                <button type="button" className="danger-button" disabled={!confirmed || demo} onClick={() => void manage("remove_user", { id: target.id })}>{hasHistory ? "Archive Account" : "Permanently Delete"}</button>
+                <button type="button" className="danger-button" disabled={!confirmed || demo} onClick={() => void manage("remove_user", { id: target.id, confirmation: accountDeleteConfirmation })}>Permanently Delete Account</button>
               </div>
             </>;
           })()}
@@ -3459,6 +3664,11 @@ export default function Page() {
                 ))}
               </select>
             </label>
+            {!competitorEdit.id && !competitorDraftRosterValid && (
+              <p className="info-note" role="status">
+                Save a division roster of 2–10 judges, including at least one Technical Judge and one Performance Judge, before adding a competitor.
+              </p>
+            )}
             <label>
               Performance order
               <input
@@ -3508,7 +3718,7 @@ export default function Page() {
               <button type="button" onClick={() => setCompetitorEdit(null)}>
                 Cancel
               </button>
-              <button className="primary">Save Competitor</button>
+              <button className="primary" disabled={!competitorEdit.id && !competitorDraftRosterValid}>Save Competitor</button>
             </div>
           </form>
         </Dialog>

@@ -134,33 +134,49 @@ export async function POST(req: Request) {
         });
         if (audit.error) throw new Error("Account updated, but audit logging failed. Contact the organizer.");
       }
-    } else if (["remove_user", "reactivate_user"].includes(action)) {
+    } else if (action === "reactivate_user") {
       const input = z.object({ id: z.string().uuid() }).parse(data);
+      const target = await client.from("profiles").select("id,username").eq("id", input.id).maybeSingle();
+      if (target.error) throw target.error;
+      if (!target.data) throw new Error("Account not found");
+      if (target.data.username?.toLowerCase() === "alexandertai") throw new Error("alexandertai is the protected full-access Organizer account");
+      const { error } = await client.rpc("reactivate_judge_account", { p_actor: profile.id, p_target: input.id });
+      if (error) throw new Error(error.message);
+    } else if (action === "remove_user") {
+      const input = z.object({ id: z.string().uuid(), confirmation: z.string().min(1).max(80) }).parse(data);
       const target = await client.from("profiles").select("id,username,name,role,active,avatar_path").eq("id", input.id).maybeSingle();
       if (target.error) throw target.error;
       if (!target.data) throw new Error("Account not found");
       if (target.data.username?.toLowerCase() === "alexandertai") throw new Error("alexandertai is the protected full-access Organizer account");
-      if (action === "reactivate_user") {
-        const { error } = await client.rpc("reactivate_judge_account", { p_actor: profile.id, p_target: input.id });
-        if (error) throw new Error(error.message);
-      } else {
-        const { data: outcome, error } = await client.rpc("remove_judge_account", { p_actor: profile.id, p_target: input.id });
-        if (error) throw new Error(error.message);
-        accountOutcome = outcome as Record<string, unknown>;
-        if (outcome?.hard_delete) {
-          if (target.data.avatar_path) {
-            const cleared = await client.from("profiles").update({ avatar_path: null }).eq("id", input.id);
-            if (cleared.error) throw new Error(`Account was disabled, but its picture could not be detached: ${cleared.error.message}`);
-            const removed = await client.storage.from("profile-avatars").remove([target.data.avatar_path]);
-            if (removed.error) throw new Error(`Account was disabled, but its picture could not be removed: ${removed.error.message}`);
-          }
-          const deleted = await client.auth.admin.deleteUser(input.id);
-          if (deleted.error) {
-            await client.from("audit").insert({ user_id: profile.id, action: "account_delete_failed", prior: { id: input.id, username: target.data.username, role: target.data.role }, next: { error: deleted.error.message } });
-            throw new Error(`Account was safely disabled, but permanent deletion failed: ${deleted.error.message}`);
-          }
-        }
+      if (input.confirmation !== target.data.username && input.confirmation !== "DELETE JUDGE")
+        throw new Error("Type the exact username or DELETE JUDGE to confirm permanent deletion.");
+      const history = await client.from("submissions").select("id", { count: "exact", head: true }).eq("user_id", input.id);
+      if (history.error) throw history.error;
+      const avatarPath = target.data.avatar_path;
+      let avatarBackup: Blob | null = null;
+      if (avatarPath) {
+        const downloaded = await client.storage.from("profile-avatars").download(avatarPath);
+        if (downloaded.error) throw new Error(`The judge’s private profile image could not be prepared for deletion: ${downloaded.error.message}`);
+        avatarBackup = downloaded.data;
+        const removed = await client.storage.from("profile-avatars").remove([avatarPath]);
+        if (removed.error) throw new Error(`The judge’s private profile image could not be removed: ${removed.error.message}`);
       }
+      const prepared = await client.rpc("prepare_judge_deletion", { p_actor: profile.id, p_target: input.id });
+      if (prepared.error) {
+        if (avatarPath && avatarBackup) await client.storage.from("profile-avatars").upload(avatarPath, avatarBackup, { contentType: avatarBackup.type || "image/webp", upsert: true });
+        throw new Error(prepared.error.message);
+      }
+      const deleted = await client.auth.admin.deleteUser(input.id);
+      if (deleted.error) {
+        const cancelled = await client.rpc("cancel_judge_deletion", { p_actor: profile.id, p_target: input.id });
+        if (avatarPath && avatarBackup) {
+          const restored = await client.storage.from("profile-avatars").upload(avatarPath, avatarBackup, { contentType: avatarBackup.type || "image/webp", upsert: true });
+          if (restored.error) throw new Error(`Account deletion failed and access was restored, but the private avatar restoration needs organizer attention: ${restored.error.message}`);
+        }
+        if (cancelled.error) throw new Error(`Account deletion failed; contact support to restore the account assignment: ${cancelled.error.message}`);
+        throw new Error(`Account was not deleted. ${deleted.error.message}`);
+      }
+      accountOutcome = { permanentlyDeleted: true, submittedScoresPreserved: (history.count ?? 0) > 0 };
     } else throw new Error("Unknown action");
     return Response.json({ ok: true, ...(accountOutcome ?? {}) });
   } catch (e) {

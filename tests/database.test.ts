@@ -1,7 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import { rankGlobal } from "../lib/scoring";
+import { DEFAULT_SCORING_RULES } from "../lib/scoring-config";
+import type { Competitor, ScoringRules, Snapshot, Submission } from "../lib/model";
+
+const migration = (suffix: string) => {
+  const matches = readdirSync("supabase/migrations").filter((name) => name.endsWith(suffix));
+  assert.equal(matches.length, 1, `Expected one migration ending in ${suffix}, found: ${matches.join(", ")}`);
+  return readFileSync(join("supabase/migrations", matches[0]), "utf8");
+};
 test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and attribution", async () => {
   const db = new PGlite();
   await db.exec(
@@ -144,13 +154,13 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     readFileSync("supabase/migrations/006_division_judges.sql", "utf8"),
   );
   await db.exec(
-    readFileSync("supabase/migrations/20260928041346_user_appearance_preferences.sql", "utf8"),
+    migration("_user_appearance_preferences.sql"),
   );
   const beforePointConfigScores = (
     await db.query("select * from submissions order by id")
   ).rows;
   await db.exec(
-    readFileSync("supabase/migrations/20260928033101_technical_point_configuration.sql", "utf8"),
+    migration("_technical_point_configuration.sql"),
   );
   const initialPointConfig = await db.query<{ revision: number; data_revision: number; t1d: string }>(
     "select revision,data_revision,rules->'bases'->'T'->>'1D' as t1d from scoring_configuration where config_id='global'",
@@ -308,13 +318,13 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     );
   }
   await db.exec(
-    readFileSync("supabase/migrations/20260928200849_variable_judge_groups.sql", "utf8"),
+    migration("_variable_judge_groups.sql"),
   );
   await db.exec(
-    readFileSync("supabase/migrations/20260928195640_allow_competitor_deletion.sql", "utf8"),
+    migration("_allow_competitor_deletion.sql"),
   );
   await db.exec(
-    readFileSync("supabase/migrations/20260928200909_restore_unrestricted_competitor_deletion.sql", "utf8"),
+    migration("_restore_unrestricted_competitor_deletion.sql"),
   );
   const alternateJ1 = crypto.randomUUID();
   await db.query("insert into auth.users values($1)", [alternateJ1]);
@@ -499,9 +509,9 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await assert.rejects(invoke(crypto.randomUUID(), 3), /no longer active/);
 
   // Migrate global account slots to roles; division assignments retain their own scoring group.
-  await db.exec(readFileSync("supabase/migrations/20260928205013_role_model_and_account_lifecycle.sql", "utf8"));
-  await db.exec(readFileSync("supabase/migrations/20260928213559_execution_scoring_workflow.sql", "utf8"));
-  await db.exec(readFileSync("supabase/migrations/20260928230000_lock_submitted_scores.sql", "utf8"));
+  await db.exec(migration("_role_model_and_account_lifecycle.sql"));
+  await db.exec(migration("_execution_scoring_workflow.sql"));
+  await db.exec(migration("_lock_submitted_scores.sql"));
   const executionConfig = await db.query<{ revision: number; data_revision: number; rules: Record<string, any> }>(
     "select revision,data_revision,rules from scoring_configuration where config_id='global'",
   );
@@ -627,5 +637,228 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   assert.ok((await db.query("select id from audit where action='account_role_change' and user_id=$1", [admin])).rows.length > 0);
   assert.ok((await db.query("select id from audit where action='account_archive' and user_id=$1", [admin])).rows.length > 0);
   assert.ok((await db.query("select id from audit where action='account_reactivate' and user_id=$1", [admin])).rows.length > 0);
+
+  await db.exec(migration("_approved_audit_integrity_fixes.sql"));
+
+  // The approved migration blocks direct roster enumeration and snapshots each
+  // division's exact 2–10-judge roster before any competitor can be created.
+  assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('authenticated','public.competitors','select') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_table_privilege('authenticated','public.competitor_judges','select') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','public.snapshot_competitor_judges()','execute') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('authenticated','public.snapshot_competitor_judges()','execute') as allowed")).rows[0].allowed, false);
+  const expectedIndexes = [
+    "competitors_division_position_idx",
+    "division_judges_user_id_idx",
+    "submissions_user_id_idx",
+    "submissions_historical_user_id_idx",
+    "operations_user_id_idx",
+    "operations_historical_user_id_idx",
+    "competitor_judges_user_id_idx",
+    "scoring_configuration_updated_by_idx",
+    "scoring_windows_competitor_id_idx",
+    "scoring_window_tokens_competitor_id_idx",
+    "scoring_window_tokens_user_id_idx",
+  ];
+  const actualIndexes = (await db.query<{ indexname: string }>(
+    "select indexname from pg_indexes where schemaname='public'",
+  )).rows.map(({ indexname }) => indexname);
+  for (const index of expectedIndexes) assert.ok(actualIndexes.includes(index), `expected query/FK index ${index}`);
+  await db.exec("update competitors set status='locked',archived=true where id='" + comp + "'; insert into divisions(name) values ('Audit Two'),('Audit Five'),('Audit Ten'),('Audit Invalid')");
+
+  const technicalThree = await addAccount("Jordan Kim", "technical_judge");
+  const technicalFour = await addAccount("Avery Park", "technical_judge");
+  const technicalFive = await addAccount("Quinn Fox", "technical_judge");
+  const technicalSix = await addAccount("Casey Yu", "technical_judge");
+  const technicalSeven = await addAccount("Robin Wu", "technical_judge");
+  const technicalEight = await addAccount("Jamie Li", "technical_judge");
+  const technicalNine = await addAccount("Drew Bell", "technical_judge");
+  const performanceTwo = await addAccount("Skyler Reed", "performance_judge");
+  const technicalGroup = [technicalOne, technicalThree, technicalFour, technicalFive, technicalSix, technicalSeven, technicalEight, technicalNine];
+  const makeAssignments = (techIds: string[], performanceIds: string[]) => [
+    ...techIds.map((user_id, index) => ({ slot: index + 1, user_id, scoring_type: "technical" })),
+    ...performanceIds.map((user_id, index) => ({ slot: techIds.length + index + 1, user_id, scoring_type: "performance" })),
+  ];
+  const assignmentsTwo = makeAssignments([technicalOne], [performanceOne]);
+  const assignmentsFive = makeAssignments(technicalGroup.slice(0, 3), [technicalTwo, performanceOne]);
+  const assignmentsTen = makeAssignments(technicalGroup, [performanceOne, performanceTwo]);
+  const selectedProfiles = await db.query<{ id: string; role: string; active: boolean; archived: boolean }>(
+    "select id,role,active,archived from profiles where id=any($1::uuid[])",
+    [[...technicalGroup, technicalTwo, performanceOne, performanceTwo]],
+  );
+  assert.equal(selectedProfiles.rows.length, 11);
+  assert.ok(selectedProfiles.rows.every((profile) => profile.active && !profile.archived), JSON.stringify(selectedProfiles.rows));
+  await assert.rejects(
+    db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Audit Invalid", JSON.stringify(makeAssignments([technicalOne, technicalTwo], []))]),
+    /at least one Technical Judge and one Performance Judge/,
+  );
+  await assert.rejects(
+    db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Audit Invalid", JSON.stringify([
+      { slot: 1, user_id: technicalOne, scoring_type: "technical" },
+      { slot: 2, user_id: technicalOne, scoring_type: "technical" },
+    ])]),
+    /Choose a different judge/,
+  );
+  for (const [division, assignments] of [["Audit Two", assignmentsTwo], ["Audit Five", assignmentsFive], ["Audit Ten", assignmentsTen]] as const) {
+    try {
+      await db.query("select manage_judge_assignments($1,$2,$3)", [admin, division, JSON.stringify(assignments)]);
+    } catch (error) {
+      throw new Error(`${division} assignment setup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const twoCompetitor = crypto.randomUUID();
+  const fiveCompetitor = crypto.randomUUID();
+  const tenCompetitor = crypto.randomUUID();
+  for (const [id, name, division, position] of [
+    [twoCompetitor, "Two Judge Test", "Audit Two", 1],
+    [fiveCompetitor, "Five Judge Test", "Audit Five", 2],
+    [tenCompetitor, "Ten Judge Test", "Audit Ten", 3],
+  ]) {
+    await db.query("select manage_competitor($1,'save',$2,false)", [admin, JSON.stringify({ id, name, division, position, status: "upcoming", dq: false, archived: false })]);
+  }
+  for (const [id, expected] of [[twoCompetitor, 2], [fiveCompetitor, 5], [tenCompetitor, 10]] as const) {
+    assert.equal((await db.query<{ count: number }>("select count(*)::int as count from competitor_judges where competitor_id=$1 and expected", [id])).rows[0].count, expected);
+  }
+  await assert.rejects(
+    db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Audit Five", JSON.stringify(assignmentsTwo)]),
+    /roster is locked/,
+  );
+
+  const issueWindow = async (competitorId: string, judgeId: string) => {
+    const result = await db.query<{ window: { competitor_id: string; revision: string; token: string; opened_at: string } }>(
+      "select issue_scoring_window($1,$2) as window", [judgeId, competitorId],
+    );
+    return result.rows[0].window;
+  };
+  const applyWindowed = async (judgeId: string, competitorId: string, scoringWindow: { revision: string; token: string; opened_at: string }, version: number, kind: string, payload: Record<string, unknown>) => {
+    try {
+      return await db.query("select apply_score($1,$2,$3,$4,$5,$6,$7,$8,$9)", [
+        judgeId, 1, crypto.randomUUID(), competitorId, version, kind, JSON.stringify(payload),
+        scoringWindow.revision, scoringWindow.token,
+      ]);
+    } catch (error) {
+      throw new Error(`${kind} for ${competitorId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  assert.equal(await issueWindow(twoCompetitor, technicalOne), null, "future competitors do not receive a scoring window");
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: twoCompetitor })]);
+  const twoTechnicalWindow = await issueWindow(twoCompetitor, technicalOne);
+  const twoPerformanceWindow = await issueWindow(twoCompetitor, performanceOne);
+  assert.ok(twoTechnicalWindow?.token && twoPerformanceWindow?.token);
+  const tokenIssuedAt = (await db.query<{ issued_at: Date }>(
+    "select issued_at from scoring_window_tokens where revision=$1 and user_id=$2",
+    [twoTechnicalWindow.revision, technicalOne],
+  )).rows[0].issued_at.toISOString();
+  assert.deepEqual(await issueWindow(twoCompetitor, technicalOne), twoTechnicalWindow, "polling reuses one stable judge/window token");
+  assert.equal((await db.query<{ issued_at: Date }>(
+    "select issued_at from scoring_window_tokens where revision=$1 and user_id=$2",
+    [twoTechnicalWindow.revision, technicalOne],
+  )).rows[0].issued_at.toISOString(), tokenIssuedAt, "state polling does not rewrite existing authorization rows");
+  assert.equal((await db.query<{ count: number }>("select count(*)::int as count from scoring_window_tokens where revision=$1 and user_id=$2", [twoTechnicalWindow.revision, technicalOne])).rows[0].count, 1);
+  await assert.rejects(
+    applyWindowed(performanceOne, twoCompetitor, twoTechnicalWindow, 0, "finish", { finished: true }),
+    /authorization is missing or invalid/,
+  );
+  const trickEvent = { id: crypto.randomUUID(), trick: "T 1D", level: 1, features: [], execution: "E-2", at: "2000-01-01T00:00:00.000Z" };
+  await applyWindowed(technicalOne, twoCompetitor, twoTechnicalWindow, 0, "put_event", trickEvent);
+  const serverStampedEvent = (await db.query<{ events: { at: string }[] }>(
+    "select events from submissions where competitor_id=$1 and historical_user_id=$2", [twoCompetitor, technicalOne],
+  )).rows[0].events[0];
+  assert.notEqual(serverStampedEvent.at, trickEvent.at, "client event timestamps do not control official sequence time");
+  await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 0, "performance", { values: [4, 4, 4, 4, 4, 4] });
+  await applyWindowed(technicalOne, twoCompetitor, twoTechnicalWindow, 1, "finish", { finished: true });
+  await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 1, "finish", { finished: true });
+
+  const activeSignalBefore = (await db.query<{ changed_at: string }>("select changed_at from live_signal where id=true")).rows[0].changed_at;
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: fiveCompetitor })]);
+  const fiveTechnicalWindow = await issueWindow(fiveCompetitor, technicalThree);
+  assert.equal((await db.query<{ count: number }>("select count(*)::int as count from submissions where competitor_id=$1", [fiveCompetitor])).rows[0].count, 5);
+  const delayedEvent = { id: crypto.randomUUID(), trick: "R 1D", level: 1, features: [], execution: "E0", at: fiveTechnicalWindow.opened_at };
+  await applyWindowed(technicalThree, fiveCompetitor, fiveTechnicalWindow, 0, "put_event", delayedEvent);
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: tenCompetitor })]);
+  await assert.rejects(
+    applyWindowed(technicalThree, fiveCompetitor, fiveTechnicalWindow, 1, "put_event", { ...delayedEvent, id: crypto.randomUUID(), at: fiveTechnicalWindow.opened_at }),
+    /Scoring window closed.*remains saved on this device/i,
+    "a forged timestamp from inside the old window cannot authorize an operation after lock",
+  );
+  assert.equal((await db.query<{ count: number }>("select count(*)::int as count from submissions where competitor_id=$1", [tenCompetitor])).rows[0].count, 10);
+  const tenTechnicalWindow = await issueWindow(tenCompetitor, technicalEight);
+  const tenPerformanceWindow = await issueWindow(tenCompetitor, performanceTwo);
+  await applyWindowed(technicalEight, tenCompetitor, tenTechnicalWindow, 0, "put_event", { ...delayedEvent, id: crypto.randomUUID(), at: tenTechnicalWindow.opened_at });
+  await applyWindowed(performanceTwo, tenCompetitor, tenPerformanceWindow, 0, "performance", { values: [3, 3, 3, 3, 3, 3] });
+  await applyWindowed(technicalEight, tenCompetitor, tenTechnicalWindow, 1, "finish", { finished: true });
+  await applyWindowed(performanceTwo, tenCompetitor, tenPerformanceWindow, 1, "finish", { finished: true });
+  const activeSignalAfter = (await db.query<{ changed_at: string }>("select changed_at from live_signal where id=true")).rows[0].changed_at;
+  assert.notEqual(activeSignalAfter, activeSignalBefore, "floor movement emits a content-free refresh signal");
+
+  const getAuditRanking = async (competitorId: string) => {
+    const competitorRows = (await db.query("select * from competitors where id=$1", [competitorId])).rows;
+    const submissionRows = (await db.query("select * from submissions where competitor_id=$1", [competitorId])).rows;
+    const rosterRows = (await db.query("select * from competitor_judges where competitor_id=$1", [competitorId])).rows;
+    const config = (await db.query<{ rules: ScoringRules }>("select rules from scoring_configuration where config_id='global'")).rows[0].rules;
+    return rankGlobal(
+      competitorRows as unknown as Competitor[],
+      submissionRows as unknown as Submission[],
+      config,
+      undefined,
+      rosterRows as unknown as NonNullable<Snapshot["judgeRoster"]>,
+    )[0];
+  };
+  const beforeDeletionRank = await getAuditRanking(twoCompetitor);
+  assert.equal(beforeDeletionRank.complete, true);
+  assert.equal(beforeDeletionRank.raw, 1.5, "historical trick score uses the edited base value and execution multiplier");
+  assert.equal(beforeDeletionRank.average, 24);
+  assert.equal(beforeDeletionRank.final, 94);
+
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: twoCompetitor })]);
+  assert.equal((await db.query<{ status: string }>("select status from competitors where id=$1", [twoCompetitor])).rows[0].status, "active", "organizer can globally reopen an earlier competitor");
+  assert.equal((await db.query("select id from competitors where status='active' and not archived")).rows.length, 1, "reopen changes the single active floor target");
+  assert.equal((await db.query<{ count: number }>("select count(*)::int as count from submissions where competitor_id=$1 and not finished and user_id is not null", [twoCompetitor])).rows[0].count, 2, "reopening unlocks both active assigned judges");
+  const reopenedTechWindow = await issueWindow(twoCompetitor, technicalOne);
+  const reopenedPerfWindow = await issueWindow(twoCompetitor, performanceOne);
+  await assert.rejects(
+    applyWindowed(technicalOne, twoCompetitor, twoTechnicalWindow, 2, "put_event", trickEvent),
+    /Scoring window closed.*remains saved on this device/i,
+    "a previously issued window token stays invalid after an Organizer reopens the competitor",
+  );
+  await applyWindowed(technicalOne, twoCompetitor, reopenedTechWindow, 3, "put_event", trickEvent);
+  await applyWindowed(technicalOne, twoCompetitor, reopenedTechWindow, 4, "finish", { finished: true });
+  await applyWindowed(performanceOne, twoCompetitor, reopenedPerfWindow, 3, "finish", { finished: true });
+  const beforeAccountDeletion = await getAuditRanking(twoCompetitor);
+  assert.deepEqual(
+    { complete: beforeAccountDeletion.complete, raw: beforeAccountDeletion.raw, average: beforeAccountDeletion.average, final: beforeAccountDeletion.final, rank: beforeAccountDeletion.rank },
+    { complete: beforeDeletionRank.complete, raw: beforeDeletionRank.raw, average: beforeDeletionRank.average, final: beforeDeletionRank.final, rank: beforeDeletionRank.rank },
+    "reopen/re-submit preserves the values when no score content changed",
+  );
+
+  for (const deletedJudge of [technicalOne, performanceOne]) {
+    await db.query("select prepare_judge_deletion($1,$2)", [admin, deletedJudge]);
+    await db.query("delete from auth.users where id=$1", [deletedJudge]);
+    assert.equal((await db.query("select id from profiles where id=$1", [deletedJudge])).rows.length, 0);
+    assert.equal((await db.query("select id from auth.users where id=$1", [deletedJudge])).rows.length, 0);
+    assert.equal((await db.query("select 1 from division_judges where user_id=$1", [deletedJudge])).rows.length, 0);
+  }
+  const deletedJudgeSubmissions = await db.query<{ user_id: string | null; historical_user_id: string; judge_name_snapshot: string; finished: boolean; events: unknown[]; performance: number[] }>(
+    "select user_id,historical_user_id,judge_name_snapshot,finished,events,performance from submissions where competitor_id=$1 order by slot", [twoCompetitor],
+  );
+  assert.deepEqual(deletedJudgeSubmissions.rows.map((row) => ({ user_id: row.user_id, id: row.historical_user_id, name: row.judge_name_snapshot, finished: row.finished })), [
+    { user_id: null, id: technicalOne, name: "Taylor Chen", finished: true },
+    { user_id: null, id: performanceOne, name: "Riley Shah", finished: true },
+  ]);
+  assert.equal(deletedJudgeSubmissions.rows[0].events.length, 1, "technical event history survives permanent account deletion");
+  assert.deepEqual(deletedJudgeSubmissions.rows[1].performance, [4, 4, 4, 4, 4, 4], "performance history survives permanent account deletion");
+  const afterDeletionRank = await getAuditRanking(twoCompetitor);
+  assert.deepEqual(
+    { complete: afterDeletionRank.complete, raw: afterDeletionRank.raw, average: afterDeletionRank.average, final: afterDeletionRank.final, rank: afterDeletionRank.rank },
+    { complete: beforeAccountDeletion.complete, raw: beforeAccountDeletion.raw, average: beforeAccountDeletion.average, final: beforeAccountDeletion.final, rank: beforeAccountDeletion.rank },
+    "deleting accounts preserves completed ranking results",
+  );
+  assert.equal((await db.query<{ count: number }>("select count(*)::int as count from competitor_judges where competitor_id=$1 and user_id=any($2::uuid[]) and not expected", [fiveCompetitor, [technicalOne, performanceOne]])).rows[0].count, 2, "unsubmitted deleted judges no longer count toward future completion");
+  assert.ok((await db.query<{ count: number }>("select count(*)::int as count from audit where action='account_permanently_deleted' and prior is null and next='{}'::jsonb")).rows[0].count >= 2, "account deletion writes only non-identifying audit entries");
+  await db.exec("set role authenticated");
+  await assert.rejects(db.query("select * from competitors"), /permission denied/);
+  await assert.rejects(db.query("select * from competitor_judges"), /permission denied/);
+  await db.exec("reset role");
   await db.close();
 });

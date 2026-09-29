@@ -12,7 +12,7 @@ $env:NEXT_PUBLIC_BYPASS_AUTH='true'
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. The demo account selector previews all five judge slots and the organizer. Demo scoring and roster changes are local to each demo account on this browser. They do not sync to other laptops. The demo does not create real Auth users or connect to event data. Local demo results are provisional and are not official event results. A connected Supabase installation enables those workflows.
+Open http://127.0.0.1:3000. The demo account selector previews Technical Judge, Performance Judge, and Organizer access. Demo scoring and roster changes stay in this browser and never connect to event data. Local demo results are provisional, not official event results.
 
 ## Fileless local development
 
@@ -48,45 +48,39 @@ For daily use, update the branch you are working on, then run `npm ci` if packag
 
 ## Connect the real event
 
-1. Create a Supabase project. In its SQL editor run `supabase/migrations/001_hidc.sql`, then `002_live_and_admin.sql`, then `003_usernames_and_development_access.sql`. For an existing installation with 001–003 applied manually, do not rerun them or use `supabase db push`; follow the migration 004 deployment procedure below. New installations should also apply `004_admin_judge_access.sql` after 003. These migrations require the standard Supabase `auth` schema and Realtime publication.
-2. Optionally run `supabase/seed.sql` to add seven sample competitors across all five divisions. Remove or archive these before the event.
-3. For manual/local hosting only, configure these variables in the host's secure environment settings (or use an ignored local env file):
+Apply the complete migration history using the project’s reviewed Supabase migration workflow. New installations start with `001_hidc.sql` through `006_division_judges.sql`, then apply the timestamped migrations in order. Existing installations must first compare remote migration history with the repository and apply only reviewed pending migrations; do not rerun schema SQL manually or blindly push migrations. The migration set requires Supabase Auth and the Realtime publication. This repository change has **not** been applied to a live Supabase project.
+
+Create the initial Organizer through the supported account bootstrap procedure, then create judge accounts and set each division’s complete roster before adding competitors. Every division needs 2–10 distinct assigned judges with at least one Technical Judge and one Performance Judge. An Organizer counts only when explicitly assigned. Competitor creation is blocked until its division has a valid roster, and the official roster is snapshotted for that competitor. `supabase/seed.sql` inserts competitors, so it can run only after valid judge rosters are already configured for every seeded division.
+
+For manual/local hosting only, configure these variables in the host's secure environment settings (or use an ignored local env file):
    - `NEXT_PUBLIC_SUPABASE_URL`: the project's HTTPS URL.
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: its publishable/anon key. This is browser-safe with the supplied RLS policies.
    - `SUPABASE_SERVICE_ROLE_KEY`: its secret service-role key. Server only; never share with judges or prefix with `NEXT_PUBLIC`.
    - `NEXT_PUBLIC_BYPASS_AUTH=false`: required for a real event. This is a build-time setting: rebuild after changing it.
-4. In Supabase Authentication → Users, create the organizer's email/password account. Copy its UUID, then run:
-
-```sql
-insert into public.profiles(id,name,username,role,slot,active,is_admin)
-values ('ORGANIZER_AUTH_UUID','organizer','organizer','server_admin',null,true,true);
-```
-
-5. Disable public account sign-up in Supabase Auth. Set your deployment's site URL and authorized redirect URLs in Supabase Auth. No registration page exists in this application.
-6. Sign in as the organizer, open Server Access Control, and create or assign all five judges. Each active slot has one holder; deactivate the old holder before assigning a replacement. Activate a competitor to open scoring on every laptop.
+Disable public account sign-up in Supabase Auth and set the deployment’s site URL and authorized redirect URLs. No public registration page exists. Use the application’s Organizer account-management flow to create judge accounts; do not expose service-role credentials or synthetic login identifiers.
 
 All public account interfaces use **username and password only**. Usernames contain 3�32 lowercase letters, digits, underscores or hyphens (first character alphanumeric), normalized case-insensitively. Judges never choose their slot and never supply or see an email address.
 
 ## Manage accounts without redeploying
 
-Server Access Control creates and edits accounts using username, password, assigned slot, and active/inactive state. The server creates a unique synthetic Auth address under `hidc.internal` and resolves usernames privately at login. Synthetic addresses are not included in profile responses, account forms, exports, or audit entries. Auth tokens remain opaque implementation details; they are not rendered as account data. Renaming a username preserves its Auth UUID, historical attribution, and private Auth identifier.
+Server Access Control creates accounts with a username, password, and one role: Technical Judge, Performance Judge, or Organizer. Division assignments determine which scoring groups a judge may submit to. A judge may be assigned to multiple divisions. The server resolves usernames through a private synthetic Auth mapping; synthetic email addresses are not exposed through profile responses, account forms, or exports. Renaming a username preserves the immutable Auth/profile ID and score attribution.
 
-Existing installations: migration 003 assigns each legacy profile a unique `user-...` username. Rename it in Server Access Control or update `profiles.username` in the Supabase dashboard. Existing Auth passwords and identifiers keep working through the server-side username lookup. Direct password resets in Supabase Auth still require no redeploy. Profiles need a unique normalized username, `role='judge'`, `slot=1..5`, and active state. Slots 1�3 are technical; 4�5 are performance. Deactivate the old slot holder before assigning a replacement. Make slot replacements between routines; historical entries retain their author.
+Deleting an account permanently removes its login and profile. Submitted scoring records and the minimal historical attribution snapshot are preserved for authorized organizers; unfinished departed work is removed from that competitor’s expected completion count. Direct Auth user management should be reserved for recovery, not routine judge setup or deletion.
 
 For five test accounts, run `node --env-file=.env.local scripts/seed-users.mjs`. It generates random passwords and prints only usernames/passwords. Never commit its output.
 
 ## Scoring and privacy decisions
 
 - `Score Details` always opens without another password. Ordinary judges see only their own competitor records, trick names, levels, features, deductions, timestamps and status. Technical point values and totals do not appear in this view or its exports.
-- `Admin` shows the signed-in judge's own event values and totals, or their own performance category values and total. It never lists another judge's entry or combined/final results. Own values can be calculated offline from the common scoring rules; computed values are not persisted to IndexedDB.
-- Only active accounts with `is_admin=true` or `role='server_admin'` receive all submissions, audit history, account lists and global rankings. They see every tab, including read-only views of all technical and performance judge slots; only a judge assigned to a slot may submit its score. Server Access Control retains floor, account, division and global-results management.
+- Performance judges may see their own performance ratings without Admin unlock. Technical numeric values and cross-judge/global results remain protected by Admin unlock and Show Points rules. Ordinary judges are limited to their own allowed data.
+- Active Organizer accounts, including `alexandertai`, can manage event state and view protected event results. Only judges assigned to a competitor’s immutable roster can submit scoring for it; an account’s role must match that division assignment.
 - The old `/api/unlock` password route is disabled. Environment flags and browser cookies cannot turn an ordinary judge into a server administrator. The server reloads the active profile on each request and scopes `state`, `manage`, `review` and `audit` accordingly.
 - PostgreSQL RLS and grants deny browser access to submission, operation and audit tables. The service-role key is used only on the server. Realtime broadcasts content-free refresh signals, never score payloads.
 - IndexedDB keeps only the current user's own label-based entries and pending operation queue. It removes global results, account lists, audit history and computed scores, even for administrator accounts. Local storage and UI state cannot authorize a server request.
 
 ## Official results
 
-Results are separate per division. Exhibition is excluded. Three finished technical totals are combined, and the highest eligible complete combined total in the division scales to 70. Two finished performance totals average to 30. Missing submissions remain pending, not zero. Results are provisional until all expected entries are finished. DQ competitors receive zero and sort after eligible competitors. Equal final scores share a rank; performance order breaks display ties. If every combined technical score is zero or negative, scaled technical is zero (never NaN or negative). Negative individual raw scores remain visible to administrators.
+Results are separate per division and use each competitor’s snapshotted judge roster. Technical scores are averaged within the technical group and scaled to 70; performance scores are averaged within the performance group for 30. A result is complete only after every expected roster submission is submitted. Exhibition is excluded, and DQ competitors rank last. Equal final scores share a rank; performance order breaks display ties. If every combined technical score is zero or negative, scaled technical is zero (never NaN or negative).
 
 Technical deductions are fixed amounts, unaffected by selected modifiers. Features compound. All calculations retain full precision; display/export values may be formatted. Export buttons offer ranked or first-submission-time order CSV and TXT; exports quote CSV and neutralize spreadsheet-formula prefixes.
 
@@ -94,7 +88,9 @@ Technical deductions are fixed amounts, unaffected by selected modifiers. Featur
 
 Each scoring operation and its resulting local snapshot are saved atomically in one IndexedDB record before the saved notification appears. A serial outbox retries unique UUID operations in order. PostgreSQL atomically checks revision, changes the submission, records the operation UUID, and appends before/after audit data. Retrying an acknowledged operation does not repeat it. Different laptop edits to the same submission produce a visible version conflict instead of silently overwriting work.
 
-Activate routines while judges are connected. Activation reserves submissions for all active slots so offline edits can sync after the routine ends. An offline laptop cannot learn a newly active competitor until it reconnects. Local saves are not proof that the central server has received the changes: inspect the pending count and sync status before closing a laptop.
+Activate or reopen a competitor through Floor Control. Server-issued scoring-window credentials bind each queued action to the assigned judge and currently open competitor. Offline edits remain saved on the judge's device and can sync while that server-side window remains open. A locally saved action is not proof that the server received it; inspect the pending count and sync status. A judge offline cannot learn a newly active competitor until reconnecting.
+
+The server does not trust browser timestamps to authorize offline work. If the organizer closes or advances the scoring window before a judge reconnects, the queued actions remain on that device and are rejected for official scoring. The judge must download a backup and contact the organizer; if the same competitor is deliberately reopened, the judge can explicitly reconcile the saved actions into the new open window. Official event timestamps use server receipt time. Keep every assigned judge connected and synced before advancing the floor; do not treat queued offline work as an official submission.
 
 Production builds register a service worker for the public shell and hashed assets only, allowing a previously opened console to reload offline. API responses are never service-worker cached. First use and new sign-in require internet. The browser must allow IndexedDB. Do not clear site data, use private browsing, or sign out with queued work. Use one laptop/tab per judge account. For a conflict, download the local backup before choosing to reload the server copy; the backup preserves the pending event history for reconciliation.
 
@@ -115,29 +111,12 @@ Set the variables above in the hosting provider's environment settings before bu
 
 ## Verification
 
-`npm test` exercises scoring, feature compounding, deductions, missing entries, division scaling, zero/negative totals, local edit immutability, and actual PostgreSQL functions/RLS through PGlite. The SQL test creates mock Supabase roles/auth schema, runs the migrations, and checks lifecycle guards, duplicate retries, stale revisions, slot authorization, and denied browser table/RPC access. Realtime transport and Supabase Auth require an actual project and are not simulated by PGlite.
+`npm test` exercises scoring, variable division rosters, migration capabilities/RLS through an isolated PGlite database, account deletion with preserved results, scoring-window validation, profile preferences, and offline queue boundaries. It does not emulate Supabase Auth or actual cross-laptop Realtime delivery.
 
-Before event use, conduct a connected rehearsal with five judge logins plus the organizer: start/lock/advance, disconnect and reconnect one laptop, retry an operation, finish all five submissions, inspect normalized results, export, reset a password, deactivate a judge, and attempt unauthorized API/table access. The local demo and a successful build do not substitute for this live rehearsal.
+Before an event, perform an authorized connected rehearsal using separate Organizer, Technical Judge, and Performance Judge sessions with a non-production event dataset. Test active-window start/reopen/lock/advance, network interruption and recovery, submission locking, rankings/exports, and direct unauthorized API and table access. Do not use live event data as a test fixture.
 
 ## Technical category colors
 
-Each trick row has a shared section color: # gold, T green, O blue, F orange, S pink/red, W purple, and R teal. Deductions are red, levels blue, features violet, and hotkey configuration slate. Light and dark palettes use separate high-contrast foreground colors. Recorded events carry the matching bordered index badge. Selection uses a checkmark and thicker inset border in addition to color; hover, disabled, and keyboard-focus states remain distinct.
+Each trick row has a shared section color: # gold, T green, O blue, F orange, S pink/red, W purple, and R teal. Deductions are red, levels blue, features violet, and hotkey configuration slate. Themes maintain category separation, readable foregrounds, and distinct hover, selected, disabled, and keyboard-focus states.
 
-## Judge 1 with administrator access (migration 004)
-
-Scoring assignment and administration are independent. `alexandertai` remains `role='judge', slot=1, active=true` and gains `is_admin=true`. The `organizer` account keeps `role='server_admin', slot=NULL` with `is_admin=true` as a backup. Other judges default to `is_admin=false`. No Auth account, UUID, password, slot, submission, or operation is recreated or reassigned.
-
-Permanent administrators have immediate access to management, all judges' scores, audit history and global rankings. Judge 1 keeps scoring and synchronizing as Judge 1. Ordinary judges receive only their own submissions and personal score values; the extra administrator password and open-admin development mode are disabled.
-
-Normal judge management cannot edit either administrator account, including passwords, usernames, slots, active status, or privileges. Administrator grants are controlled in the database, never by a browser-supplied account payload. Deliberate administrator changes require a separate database maintenance operation. Keep Judge 1 assigned to alexandertai.
-
-Offline writes are sanitized at the IndexedDB boundary for every account: only the current user's submissions, without computed totals/event values, are retained. Global rankings, account lists, audit history, and the protected-access flag are removed. Pending operations and their IDs/versions remain intact. Cached privileges cannot authorize a server request; each request reloads the active profile from the database. Protected data returns only after an authorized online refresh.
-
-### Existing live installation
-
-Migration 004 has already been applied and verified in project `msmdzuprjankfsgdozed`: alexandertai is still Judge 1 with `is_admin=true`, organizer remains the backup administrator, judges 2–5 have `is_admin=false`, and existing profile UUIDs and slots are unchanged. Do not rerun migrations 001–004 or blindly run `supabase db push`. Commit only reviewed source, tests and documentation to the public repository; `.env.local`, ZIP archives and credentials must stay out of Git. A push to the connected production branch can start a Vercel deployment, so review and test first.
-
-Before contest use, test separate sessions for an ordinary technical judge, ordinary performance judge, alexandertai and organizer. Check Score Details, Admin, Server Access Control, global rankings, technical/performance slot selectors, exports, direct API access, offline queue and synchronization. Keep venue Wi-Fi reliable and rehearse with all five judges.
-
-
-Tests cover actual API handlers with mocked external services, plus PostgreSQL migration/RLS tests with preexisting scores and operations. They verify administrator Judge 1 scoring, backup access, denial for judges 2–5, protected account edits, six-character passwords, personal versus global API scope, exports and offline redaction. They do not replace live Supabase Auth/realtime verification after deployment.
+Organizer privileges are account capabilities, separate from scoring assignment. `alexandertai` remains a full-access Organizer, while Organizer accounts score only if explicitly assigned to a division. Judges never receive global access merely from their technical/performance scoring role. Cached data or local UI state does not authorize server requests.

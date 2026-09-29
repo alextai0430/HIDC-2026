@@ -9,13 +9,23 @@ const op = z.object({
   expected_version: z.number().int().nonnegative(),
   kind: z.enum(["put_event", "delete_event", "performance", "finish", "dq"]),
   payload: z.record(z.unknown()),
+  scoring_window_revision: z.string().uuid(),
+  scoring_window_token: z.string().uuid(),
 });
 export async function POST(req: Request) {
   try {
     const { client, profile } = await identity(req);
     if (!isAssignedJudge(profile))
       throw new Error("Only assigned judges may submit scores");
-    const input = op.parse(await req.json());
+    const raw = await req.json();
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
+      !((raw as Record<string, unknown>).scoring_window_revision) ||
+      !((raw as Record<string, unknown>).scoring_window_token)) {
+      return Response.json({
+        error: "This queued score predates scoring-window authorization. It remains saved locally; ask the organizer to reopen the competitor so you can reconcile it.",
+      }, { status: 409, headers: { "Cache-Control": "no-store" } });
+    }
+    const input = op.parse(raw);
     let payload: unknown;
     if (input.kind === "put_event") {
       const e = z
@@ -56,6 +66,8 @@ export async function POST(req: Request) {
       p_version: input.expected_version,
       p_kind: input.kind,
       p_payload: payload,
+      p_window_revision: input.scoring_window_revision,
+      p_window_token: input.scoring_window_token,
     });
     if (error) throw new Error(error.message);
     const scoringConfiguration = await loadScoringConfiguration(client);

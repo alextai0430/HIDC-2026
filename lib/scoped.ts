@@ -37,7 +37,7 @@ export function detailExportRows(
 ) {
   return detailSubmissions(profile, submissions).map((s) => ({
     Competitor: competitors.find((c) => c.id === s.competitor_id)?.name,
-    Judge: s.user_id === profile.id ? profile.name : profiles.find((candidate) => candidate.id === s.user_id)?.name ?? "Former judge",
+    Judge: s.user_id === profile.id ? profile.name : profiles.find((candidate) => candidate.id === s.user_id)?.name ?? s.judge_name_snapshot ?? "Deleted Judge",
     Scoring: s.scoring_type ?? (s.slot <= 3 ? "Technical" : "Performance"),
     Status: s.finished ? "Submitted" : "Draft",
     DQ: s.dq,
