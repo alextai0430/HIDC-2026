@@ -3,6 +3,7 @@ import { z } from "zod";
 import { identity, failure } from "@/lib/server";
 import { executionOptions, tricks, deductions } from "@/lib/model";
 import { loadScoringConfiguration } from "@/lib/scoring-config";
+import { parsePerformancePayload } from "@/lib/performance-patch";
 const op = z.object({
   id: z.string().uuid(),
   competitor_id: z.string().uuid(),
@@ -27,6 +28,7 @@ export async function POST(req: Request) {
     }
     const input = op.parse(raw);
     let payload: unknown;
+    let recoveredLegacyPerformancePayload = false;
     if (input.kind === "put_event") {
       const e = z
         .object({
@@ -49,11 +51,9 @@ export async function POST(req: Request) {
     } else if (input.kind === "delete_event") {
       payload = z.object({ id: z.string().uuid() }).parse(input.payload);
     } else if (input.kind === "performance") {
-      payload = z
-        .object({
-          values: z.array(z.number().min(0).max(5).multipleOf(0.5)).length(6),
-        })
-        .parse(input.payload);
+      const parsed = parsePerformancePayload(input.payload);
+      payload = { patches: parsed.patches };
+      recoveredLegacyPerformancePayload = parsed.recoveredLegacyPayload;
     } else if (input.kind === "finish")
       payload = z.object({ finished: z.literal(true) }).parse(input.payload);
     else payload = z.object({ dq: z.boolean() }).parse(input.payload);
@@ -74,6 +74,7 @@ export async function POST(req: Request) {
     return Response.json({
       ...(data && typeof data === "object" ? data : { ok: true }),
       scoringConfigRevision: scoringConfiguration.revision,
+      ...(recoveredLegacyPerformancePayload ? { legacyPerformancePayloadRecovered: true } : {}),
     });
   } catch (e) {
     return failure(e);

@@ -789,6 +789,9 @@ export default function Page() {
             `An offline score selection from configuration v${clientRevision} was synced using current rules v${result.scoringConfigRevision}.`,
           );
         }
+        if (result.legacyPerformancePayloadRecovered) {
+          setNotice("A previously queued Performance update was safely recovered and synced.");
+        }
         chain.current = chain.current.then(async () => {
           if (ref.current)
             await commit({
@@ -1041,11 +1044,6 @@ export default function Page() {
         }
         if (kind === "finish" && payload.finished !== true) {
           throw new Error("Submitted scores can only be reopened by an organizer.");
-        }
-        if (kind === "performance" && typeof payload.index === "number") {
-          const values = [...(s?.performance ?? [0, 0, 0, 0, 0, 0])];
-          values[payload.index] = Number(payload.value);
-          payload = { values };
         }
         const op: Operation = {
           id: uid(),

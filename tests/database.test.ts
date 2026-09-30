@@ -648,6 +648,7 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   // forward migration so the test exercises the actual applied migration chain.
   await db.exec(migration("cascade_unlock_attempts_on_profile_delete.sql"));
   await db.exec(migration("track_competitor_score_operations_and_delete_division.sql"));
+  await db.exec(migration("_patch_performance_scores_by_category.sql"));
   assert.equal((await db.query<{ count: number }>("select count(*)::int as count from operations where competitor_id=$1", [comp])).rows[0].count > 0, true, "legacy score receipts are backfilled from unambiguous same-transaction audit records");
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('authenticated','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);
@@ -775,10 +776,10 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     );
     return result.rows[0].window;
   };
-  const applyWindowed = async (judgeId: string, competitorId: string, scoringWindow: { revision: string; token: string; opened_at: string }, version: number, kind: string, payload: Record<string, unknown>) => {
+  const applyWindowed = async (judgeId: string, competitorId: string, scoringWindow: { revision: string; token: string; opened_at: string }, version: number, kind: string, payload: Record<string, unknown>, operationId = crypto.randomUUID()) => {
     try {
       return await db.query("select apply_score($1,$2,$3,$4,$5,$6,$7,$8,$9)", [
-        judgeId, 1, crypto.randomUUID(), competitorId, version, kind, JSON.stringify(payload),
+        judgeId, 1, operationId, competitorId, version, kind, JSON.stringify(payload),
         scoringWindow.revision, scoringWindow.token,
       ]);
     } catch (error) {
@@ -811,9 +812,35 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
     "select events from submissions where competitor_id=$1 and historical_user_id=$2", [twoCompetitor, technicalOne],
   )).rows[0].events[0];
   assert.notEqual(serverStampedEvent.at, trickEvent.at, "client event timestamps do not control official sequence time");
-  await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 0, "performance", { values: [4, 4, 4, 4, 4, 4] });
+  // Simulate an existing score whose numeric vector is hidden from the judge.
+  await db.query("update submissions set performance='[5,4,3,2,1,0]'::jsonb where competitor_id=$1 and historical_user_id=$2", [twoCompetitor, performanceOne]);
+  const duplicateSafePatchId = crypto.randomUUID();
+  await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 0, "performance", { patches: [{ index: 2, value: 4.5 }] }, duplicateSafePatchId);
+  const duplicatePatchResult = await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 0, "performance", { patches: [{ index: 2, value: 4.5 }] }, duplicateSafePatchId);
+  const duplicateResponse = (duplicatePatchResult.rows[0] as Record<string, unknown>).apply_score as { duplicate: boolean };
+  assert.equal(duplicateResponse.duplicate, true, "retries with the same operation ID are deduplicated");
+  assert.equal((await db.query<{ version: number; performance: number[] }>("select version,performance from submissions where competitor_id=$1 and historical_user_id=$2", [twoCompetitor, performanceOne])).rows[0].version, 1);
+  assert.deepEqual((await db.query<{ performance: number[] }>("select performance from submissions where competitor_id=$1 and historical_user_id=$2", [twoCompetitor, performanceOne])).rows[0].performance, [5, 4, 4.5, 2, 1, 0], "a hidden category patch retains all untouched persisted categories");
+  const remainingPatches = [
+    { index: 2, value: 4 },
+    { index: 0, value: 4 },
+    { index: 1, value: 4 },
+    { index: 3, value: 4 },
+    { index: 4, value: 4 },
+    { index: 5, value: 4 },
+  ];
+  for (const [offset, patch] of remainingPatches.entries()) {
+    await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, offset + 1, "performance", { patches: [patch] });
+  }
+  const sixCategoryResult = await db.query<{ version: number; performance: number[] }>("select version,performance from submissions where competitor_id=$1 and historical_user_id=$2", [twoCompetitor, performanceOne]);
+  assert.deepEqual(sixCategoryResult.rows[0], { version: 7, performance: [4, 4, 4, 4, 4, 4] }, "six individual edits preserve the six-category vector");
+  await assert.rejects(
+    applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 7, "performance", { patches: [{ index: 6, value: 2 }] }),
+    /indexes 0–5/,
+    "malformed patches are rejected without a score write",
+  );
   await applyWindowed(technicalOne, twoCompetitor, twoTechnicalWindow, 1, "finish", { finished: true });
-  await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 1, "finish", { finished: true });
+  await applyWindowed(performanceOne, twoCompetitor, twoPerformanceWindow, 7, "finish", { finished: true });
 
   const activeSignalBefore = (await db.query<{ changed_at: string }>("select changed_at from live_signal where id=true")).rows[0].changed_at;
   await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: fiveCompetitor })]);
@@ -831,7 +858,7 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   const tenTechnicalWindow = await issueWindow(tenCompetitor, technicalEight);
   const tenPerformanceWindow = await issueWindow(tenCompetitor, performanceTwo);
   await applyWindowed(technicalEight, tenCompetitor, tenTechnicalWindow, 0, "put_event", { ...delayedEvent, id: crypto.randomUUID(), at: tenTechnicalWindow.opened_at });
-  await applyWindowed(performanceTwo, tenCompetitor, tenPerformanceWindow, 0, "performance", { values: [3, 3, 3, 3, 3, 3] });
+  await applyWindowed(performanceTwo, tenCompetitor, tenPerformanceWindow, 0, "performance", { patches: Array.from({ length: 6 }, (_, index) => ({ index, value: 3 })) });
   await applyWindowed(technicalEight, tenCompetitor, tenTechnicalWindow, 1, "finish", { finished: true });
   await applyWindowed(performanceTwo, tenCompetitor, tenPerformanceWindow, 1, "finish", { finished: true });
   const activeSignalAfter = (await db.query<{ changed_at: string }>("select changed_at from live_signal where id=true")).rows[0].changed_at;
@@ -869,7 +896,7 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   );
   await applyWindowed(technicalOne, twoCompetitor, reopenedTechWindow, 3, "put_event", trickEvent);
   await applyWindowed(technicalOne, twoCompetitor, reopenedTechWindow, 4, "finish", { finished: true });
-  await applyWindowed(performanceOne, twoCompetitor, reopenedPerfWindow, 3, "finish", { finished: true });
+  await applyWindowed(performanceOne, twoCompetitor, reopenedPerfWindow, 9, "finish", { finished: true });
   const beforeAccountDeletion = await getAuditRanking(twoCompetitor);
   assert.deepEqual(
     { complete: beforeAccountDeletion.complete, raw: beforeAccountDeletion.raw, average: beforeAccountDeletion.average, final: beforeAccountDeletion.final, rank: beforeAccountDeletion.rank },

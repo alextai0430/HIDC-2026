@@ -1,6 +1,7 @@
 import { openDB } from "idb";
 import { Operation, Snapshot, Submission } from "./model";
 import { normalizeAppearancePreferences, type AppearancePreferences } from "./appearance";
+import { parsePerformancePayload } from "./performance-patch";
 const database = () =>
   openDB("hidc-2026", 1, {
     upgrade(db) {
@@ -94,7 +95,22 @@ export function applyLocal(snapshot: Snapshot, op: Operation): Snapshot {
   }
   if (op.kind === "delete_event")
     s.events = s.events.filter((e) => e.id !== p.id);
-  if (op.kind === "performance") s.performance = p.values as number[];
+  if (op.kind === "performance") {
+    // A masked server snapshot contains no Performance vector. Start with a
+    // local-only six-slot view, then apply only values present in this action;
+    // the server performs the same patch against the complete persisted vector.
+    const values = s.performance.length === 6
+      ? [...s.performance]
+      : Array<number>(6).fill(0);
+    try {
+      const { patches } = parsePerformancePayload(p);
+      for (const patch of patches) values[patch.index] = patch.value;
+      s.performance = values;
+    } catch {
+      // Preserve the queued operation for the API to return an explicit
+      // recovery error. Do not drop it or replace saved values with defaults.
+    }
+  }
   if (op.kind === "finish") {
     s.finished = p.finished as boolean;
     if (s.finished) s.submitted_at ??= new Date().toISOString();

@@ -352,6 +352,123 @@ test("sync leaves division authorization to the server-side assignment check", a
   assert.equal(calls.length, 2, "judge sync cannot reopen a submitted score");
 });
 
+test("Performance sync sends a single category patch and never returns masked values", async () => {
+  const calls: any[] = [];
+  const client = {
+    rpc: async (...args: any[]) => {
+      calls.push(args);
+      return { data: { ok: true, version: 8 }, error: null };
+    },
+    from: (table: string) => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: async () => ({
+          data: table === "scoring_configuration"
+            ? { revision: 1, data_revision: 1, rules: DEFAULT_SCORING_RULES }
+            : null,
+          error: null,
+        }),
+      };
+      return builder;
+    },
+  };
+  const performanceJudge = judges[2];
+  const payload = {
+    id: crypto.randomUUID(),
+    competitor_id: crypto.randomUUID(),
+    expected_version: 7,
+    scoring_window_revision: crypto.randomUUID(),
+    scoring_window_token: crypto.randomUUID(),
+    kind: "performance",
+    payload: { index: 4, value: 3.5 },
+  };
+  const response = await route("sync", performanceJudge, client).POST(request(payload));
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /application\/json/i);
+  assert.deepEqual(calls[0][1].p_payload, { patches: [{ index: 4, value: 3.5 }] });
+  const body = await response.json();
+  assert.equal(body.version, 8);
+  assert.equal(body.legacyPerformancePayloadRecovered, undefined);
+  assert.equal(JSON.stringify(body).includes("3.5"), false, "sync response does not echo score values");
+});
+
+test("Performance sync safely adapts sparse legacy queued vectors and returns recovery metadata", async () => {
+  const calls: any[] = [];
+  const client = {
+    rpc: async (...args: any[]) => {
+      calls.push(args);
+      return { data: { ok: true, version: 9 }, error: null };
+    },
+    from: (table: string) => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: async () => ({
+          data: table === "scoring_configuration"
+            ? { revision: 1, data_revision: 1, rules: DEFAULT_SCORING_RULES }
+            : null,
+          error: null,
+        }),
+      };
+      return builder;
+    },
+  };
+  const legacyValues: (number | undefined)[] = [];
+  legacyValues[1] = 2.5;
+  legacyValues[4] = 4;
+  const payload = {
+    id: crypto.randomUUID(),
+    competitor_id: crypto.randomUUID(),
+    expected_version: 8,
+    scoring_window_revision: crypto.randomUUID(),
+    scoring_window_token: crypto.randomUUID(),
+    kind: "performance",
+    payload: { values: legacyValues },
+  };
+  const response = await route("sync", judges[3], client).POST(request(payload));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.legacyPerformancePayloadRecovered, true);
+  assert.deepEqual(calls[0][1].p_payload, {
+    patches: [{ index: 1, value: 2.5 }, { index: 4, value: 4 }],
+  });
+});
+
+test("malformed Performance payloads return a clear JSON validation error without calling the score RPC", async () => {
+  const calls: any[] = [];
+  const client = {
+    rpc: async (...args: any[]) => { calls.push(args); return { data: {}, error: null }; },
+    from: (table: string) => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: async () => ({
+          data: table === "scoring_configuration"
+            ? { revision: 1, data_revision: 1, rules: DEFAULT_SCORING_RULES }
+            : null,
+          error: null,
+        }),
+      };
+      return builder;
+    },
+  };
+  const payload = {
+    id: crypto.randomUUID(),
+    competitor_id: crypto.randomUUID(),
+    expected_version: 0,
+    scoring_window_revision: crypto.randomUUID(),
+    scoring_window_token: crypto.randomUUID(),
+    kind: "performance",
+    payload: { values: [null, null] },
+  };
+  const response = await route("sync", judges[3], client).POST(request(payload));
+  assert.equal(response.status, 400);
+  assert.match(response.headers.get("content-type") ?? "", /application\/json/i);
+  assert.match((await response.json()).error, /no recoverable category values/i);
+  assert.equal(calls.length, 0);
+});
+
 test("both administrators can activate, lock, review and create divisions", async () => {
   for (const p of [alex, organizer]) {
     const calls: any[] = [];
