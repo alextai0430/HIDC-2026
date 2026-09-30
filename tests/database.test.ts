@@ -644,6 +644,14 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await db.exec(migration("revoke_competitor_table_privileges.sql"));
   await db.exec(migration("restrict_public_api_grants.sql"));
   await db.exec(migration("active_live_signal_rls.sql"));
+  // This is already live in production. Apply it in the test schema before the
+  // forward migration so the test exercises the actual applied migration chain.
+  await db.exec(migration("cascade_unlock_attempts_on_profile_delete.sql"));
+  await db.exec(migration("track_competitor_score_operations_and_delete_division.sql"));
+  assert.equal((await db.query<{ count: number }>("select count(*)::int as count from operations where competitor_id=$1", [comp])).rows[0].count > 0, true, "legacy score receipts are backfilled from unambiguous same-transaction audit records");
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('authenticated','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);
+  assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('service_role','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, true);
 
   // The approved migration blocks direct roster enumeration and snapshots each
   // division's exact 2–10-judge roster before any competitor can be created.
@@ -893,9 +901,102 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   );
   assert.equal((await db.query<{ count: number }>("select count(*)::int as count from competitor_judges where competitor_id=$1 and user_id=any($2::uuid[]) and not expected", [fiveCompetitor, [technicalOne, performanceOne]])).rows[0].count, 2, "unsubmitted deleted judges no longer count toward future completion");
   assert.ok((await db.query<{ count: number }>("select count(*)::int as count from audit where action='account_permanently_deleted' and prior is null and next='{}'::jsonb")).rows[0].count >= 2, "account deletion writes only non-identifying audit entries");
+
+  // Reproduce the live judge2 deletion failure: the temporary Admin-unlock
+  // counter must cascade away, while auth/profile cleanup stays transactional.
+  const judge2Fixture = await addAccount("judge2", "technical_judge");
+  await db.query("insert into unlock_attempts(user_id,attempts,expires) values($1,3,now()+interval '15 minutes')", [judge2Fixture]);
+  await db.query("select prepare_judge_deletion($1,$2)", [admin, judge2Fixture]);
+  await db.query("delete from auth.users where id=$1", [judge2Fixture]);
+  assert.equal((await db.query("select id from profiles where id=$1", [judge2Fixture])).rows.length, 0);
+  assert.equal((await db.query("select id from auth.users where id=$1", [judge2Fixture])).rows.length, 0);
+  assert.equal((await db.query("select user_id from unlock_attempts where user_id=$1", [judge2Fixture])).rows.length, 0, "unlock attempt is removed with the deleted profile");
+
+  const deletionDivision = "Disposable Division";
+  const preservedDivision = "Preserved Division";
+  await db.exec(`insert into divisions(name) values ('${deletionDivision}'),('${preservedDivision}')`);
+  await db.query("select manage_judge_assignments($1,$2,$3)", [admin, deletionDivision, JSON.stringify(makeAssignments([technicalThree], [performanceTwo]))]);
+  await db.query("select manage_judge_assignments($1,$2,$3)", [admin, preservedDivision, JSON.stringify(makeAssignments([technicalFour], [performanceTwo]))]);
+  const disposableCompetitor = crypto.randomUUID();
+  const preservedCompetitor = crypto.randomUUID();
+  await db.query("select manage_competitor($1,'save',$2,false)", [admin, JSON.stringify({ id: disposableCompetitor, name: "Disposable Competitor", division: deletionDivision, position: 100, status: "upcoming", dq: false, archived: false })]);
+  await db.query("select manage_competitor($1,'save',$2,false)", [admin, JSON.stringify({ id: preservedCompetitor, name: "Preserved Competitor", division: preservedDivision, position: 101, status: "upcoming", dq: false, archived: false })]);
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: disposableCompetitor })]);
+  const disposableTechWindow = await issueWindow(disposableCompetitor, technicalThree);
+  const disposablePerfWindow = await issueWindow(disposableCompetitor, performanceTwo);
+  assert.ok(disposableTechWindow?.token && disposablePerfWindow?.token);
+  await applyWindowed(technicalThree, disposableCompetitor, disposableTechWindow, 0, "put_event", {
+    id: crypto.randomUUID(), trick: "T 1D", level: 1, features: [], execution: "E0", at: disposableTechWindow.opened_at,
+  });
+  await applyWindowed(technicalThree, disposableCompetitor, disposableTechWindow, 1, "finish", { finished: true });
+  const linkedOperation = (await db.query<{ competitor_id: string }>(
+    "select competitor_id from operations where historical_user_id=$1 and competitor_id=$2 order by created_at desc limit 1",
+    [technicalThree, disposableCompetitor],
+  )).rows[0];
+  assert.equal(linkedOperation.competitor_id, disposableCompetitor, "new score-operation receipts are attributable to the competitor");
+
+  await db.query("insert into operations(id,user_id,historical_user_id,competitor_id) values($1,$2,$2,$3)", [crypto.randomUUID(), technicalThree, tenCompetitor]);
+  const beforePreservedData = {
+    competitor: (await db.query("select * from competitors where id=$1", [tenCompetitor])).rows,
+    submissions: (await db.query("select * from submissions where competitor_id=$1 order by slot", [tenCompetitor])).rows,
+    roster: (await db.query("select * from competitor_judges where competitor_id=$1 order by roster_order", [tenCompetitor])).rows,
+    operations: (await db.query("select * from operations where competitor_id=$1", [tenCompetitor])).rows,
+  };
+  await assert.rejects(
+    db.query("select delete_division($1,$2,$3)", [admin, deletionDivision, "wrong confirmation"]),
+    /Type the exact division name or DELETE DIVISION/,
+    "invalid confirmation makes no changes",
+  );
+  assert.equal((await db.query("select name from divisions where name=$1", [deletionDivision])).rows.length, 1);
+  const deletedDivision = await db.query<{ result: Record<string, any> }>(
+    "select delete_division($1,$2,$3) as result", [admin, deletionDivision, deletionDivision],
+  );
+  assert.deepEqual(deletedDivision.rows[0].result, {
+    division: deletionDivision,
+    competitors: 1,
+    submissions: 2,
+    submitted_scores: 1,
+    activeCompetitorCleared: true,
+  });
+  for (const table of ["competitors", "submissions", "competitor_judges", "scoring_windows", "scoring_window_tokens", "operations"]) {
+    const row = await db.query(`select 1 from ${table} where ${table === "competitors" ? "id" : "competitor_id"}=$1 limit 1`, [disposableCompetitor]);
+    assert.equal(row.rows.length, 0, `${table} for the deleted division is removed`);
+  }
+  assert.equal((await db.query("select 1 from divisions where name=$1", [deletionDivision])).rows.length, 0);
+  assert.equal((await db.query("select 1 from profiles where id=any($1::uuid[])", [[technicalThree, performanceTwo]])).rows.length, 2, "judge accounts are not removed with a division");
+  assert.equal((await db.query("select 1 from competitors where id=$1 and division=$2", [preservedCompetitor, preservedDivision])).rows.length, 1, "another division's competitor remains intact");
+  assert.equal((await db.query("select 1 from division_judges where division=$1", [preservedDivision])).rows.length, 2, "another division's judge assignments remain intact");
+  assert.deepEqual({
+    competitor: (await db.query("select * from competitors where id=$1", [tenCompetitor])).rows,
+    submissions: (await db.query("select * from submissions where competitor_id=$1 order by slot", [tenCompetitor])).rows,
+    roster: (await db.query("select * from competitor_judges where competitor_id=$1 order by roster_order", [tenCompetitor])).rows,
+    operations: (await db.query("select * from operations where competitor_id=$1", [tenCompetitor])).rows,
+  }, beforePreservedData, "unrelated division data and score operations remain unchanged");
+  assert.equal((await db.query("select 1 from audit where action='division_permanently_deleted' and user_id=$1 and prior->>'division'=$2 and prior->>'competitors'='1' and next->>'deleted'='true'", [admin, deletionDivision])).rows.length, 1, "division deletion has a concise audit record without score details");
+  await assert.rejects(db.query("select delete_division($1,$2,$3)", [technicalThree, preservedDivision, "DELETE DIVISION"]), /Organizer access required/);
+
+  const emptyDivision = "Empty Disposable Division";
+  await db.query("insert into divisions(name) values ($1)", [emptyDivision]);
+  const signalBeforeEmptyDelete = (await db.query<{ changed_at: string }>("select changed_at from live_signal where id")).rows[0].changed_at;
+  const emptyDelete = await db.query<{ result: Record<string, any> }>(
+    "select delete_division($1,$2,$3) as result", [admin, emptyDivision, "DELETE DIVISION"],
+  );
+  assert.deepEqual(emptyDelete.rows[0].result, {
+    division: emptyDivision,
+    competitors: 0,
+    submissions: 0,
+    submitted_scores: 0,
+    activeCompetitorCleared: false,
+  });
+  const signalAfterEmptyDelete = (await db.query<{ changed_at: string }>("select changed_at from live_signal where id")).rows[0].changed_at;
+  assert.notEqual(signalAfterEmptyDelete, signalBeforeEmptyDelete, "empty-division deletion still signals connected clients to refresh");
+  assert.equal((await db.query("select 1 from divisions where name=$1", [emptyDivision])).rows.length, 0);
+  assert.equal((await db.query("select 1 from divisions where name=$1", [preservedDivision])).rows.length, 1);
+
   await db.exec("set role authenticated");
   await assert.rejects(db.query("select * from competitors"), /permission denied/);
   await assert.rejects(db.query("select * from competitor_judges"), /permission denied/);
+  await assert.rejects(db.query("select delete_division($1,$2,$3)", [admin, "Preserved Division", "DELETE DIVISION"]), /permission denied/);
   await db.exec("reset role");
   await db.close();
 });

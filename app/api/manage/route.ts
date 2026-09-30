@@ -89,6 +89,18 @@ export async function POST(req: Request) {
       if (error) throw new Error(error.message);
       const audit = await client.from("audit").insert({ user_id: profile.id, action: "division_create", next: { name } });
       if (audit.error) throw new Error("Division created, but audit logging failed. Contact the organizer.");
+    } else if (action === "remove_division") {
+      const input = z.object({
+        name: z.string().min(1).max(80).refine((name) => name.trim().length > 0),
+        confirmation: z.string().min(1).max(80),
+      }).parse(data);
+      const { data: result, error } = await client.rpc("delete_division", {
+        p_actor: profile.id,
+        p_division: input.name,
+        p_confirmation: input.confirmation,
+      });
+      if (error) throw new Error(error.message);
+      return Response.json({ ok: true, divisionOutcome: result });
     } else if (action === "delete") {
       const input = z.object({ id: z.string().uuid() }).parse(data);
       const { error } = await client.rpc("delete_competitor", { p_actor: profile.id, p_id: input.id });

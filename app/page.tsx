@@ -311,6 +311,8 @@ export default function Page() {
   const appearanceSyncBusy = useRef(false);
   const [newDivision, setNewDivision] = useState("");
   const [divisionFormOpen, setDivisionFormOpen] = useState(false);
+  const [divisionDeleteTarget, setDivisionDeleteTarget] = useState("");
+  const [divisionDeleteConfirmation, setDivisionDeleteConfirmation] = useState("");
   const [submittingCompetitors, setSubmittingCompetitors] = useState<Set<string>>(() => new Set());
   const [trick, setTrick] = useState(""),
     [level, setLevel] = useState(1),
@@ -420,13 +422,21 @@ export default function Page() {
     !current.archived &&
     current.status === "active" &&
     !submissionSubmitted;
-  const allDivisions = Array.from(
-    new Set([
-      ...divisions,
-      ...(state?.divisions ?? []),
-      ...(state?.competitors.map((c) => c.division) ?? []),
-    ]),
-  );
+  const allDivisions = Array.from(new Set([
+    ...(state ? state.divisions ?? [] : divisions),
+    ...(state?.competitors.map((c) => c.division) ?? []),
+  ]));
+  const allDivisionKey = allDivisions.join("\u0000");
+  useEffect(() => {
+    const options = allDivisionKey ? allDivisionKey.split("\u0000") : [];
+    if (!options.length) {
+      if (assignmentDivision) setAssignmentDivision("");
+      setAssignmentDraft(null);
+    } else if (!options.includes(assignmentDivision)) {
+      setAssignmentDivision(options[0]);
+      setAssignmentDraft(null);
+    }
+  }, [allDivisionKey, assignmentDivision]);
   const syncStatus = demo
     ? "Score saved locally · demo"
     : syncError && workspace?.queue.length
@@ -1593,15 +1603,23 @@ export default function Page() {
           setNotice((result as { submittedScoresPreserved?: boolean })?.submittedScoresPreserved
             ? "Account permanently deleted. Submitted scores were preserved for authorized event records."
             : "Account and login permanently deleted.");
+        } else if (action === "remove_division") {
+          const impact = (result as { divisionOutcome?: { competitors?: number; submitted_scores?: number } })?.divisionOutcome;
+          setNotice(`Division deleted. Removed ${impact?.competitors ?? 0} competitors and ${impact?.submitted_scores ?? 0} submitted scores.`);
         } else if (action === "reactivate_user") setNotice("Legacy archived account reactivated.");
         else setNotice(action === "create_user" ? "Account created." : action === "update_user" ? "Account updated." : action === "assignments" ? "Division assignments saved." : action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
         try {
           await refresh();
         } catch (refreshError) {
-          if (action !== "create_user" && action !== "update_user") throw refreshError;
-          setNotice(action === "create_user"
-            ? "Account created. The account list could not refresh yet."
-            : "Account updated. The account list could not refresh yet.");
+          if (action === "create_user" || action === "update_user") {
+            setNotice(action === "create_user"
+              ? "Account created. The account list could not refresh yet."
+              : "Account updated. The account list could not refresh yet.");
+          } else if (action === "remove_division") {
+            setNotice("Division deleted. The server view could not refresh yet; retry sync to update progress and rankings.");
+          } else {
+            throw refreshError;
+          }
           setSyncError((refreshError as Error).message);
         }
       }
@@ -1611,6 +1629,11 @@ export default function Page() {
       if (demo) setNotice(action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
       setAccountDeleteTarget(null);
       setAccountDeleteConfirmation("");
+      if (action === "remove_division") {
+        setDivisionDeleteTarget("");
+        setDivisionDeleteConfirmation("");
+        setAssignmentDraft(null);
+      }
       return true;
     } catch (e) {
       if (action === "create_user" || action === "update_user")
@@ -3009,7 +3032,7 @@ export default function Page() {
               <div className="panel-heading">
                 <h3>Division Judge Assignments</h3>
                 <div className="division-assignment-header-actions">
-                  <label>
+                  {allDivisions.length ? <label>
                     Division
                     <select
                       aria-label="Division judge assignments"
@@ -3022,7 +3045,7 @@ export default function Page() {
                     >
                       {allDivisions.map((division) => <option key={division}>{division}</option>)}
                     </select>
-                  </label>
+                  </label> : <span className="muted">No divisions</span>}
                   <button
                     type="button"
                     disabled={demo}
@@ -3032,6 +3055,17 @@ export default function Page() {
                     }}
                   >
                   <Plus size={14} /> Add Division
+                  </button>
+                  <button
+                    type="button"
+                    className="danger-button"
+                    disabled={demo || !assignmentDivision}
+                    onClick={() => {
+                      setDivisionDeleteTarget(assignmentDivision);
+                      setDivisionDeleteConfirmation("");
+                    }}
+                  >
+                    <Trash2 size={14} /> Delete Division
                   </button>
                 </div>
               </div>
@@ -3056,7 +3090,7 @@ export default function Page() {
                   <button className="primary" disabled={demo || !newDivision.trim() || allDivisions.some((division) => division.trim().toLocaleLowerCase() === newDivision.trim().toLocaleLowerCase())}>Save Division</button>
                 </form>
               )}
-              <div className="division-assignment-grid">
+              {assignmentDivision ? <div className="division-assignment-grid">
                 {editableAssignmentRows.map(({ slot, user_id, scoring_type }) => {
                   const usedElsewhere = new Set(editableAssignmentRows.filter((row) => row.slot !== slot).map((row) => row.user_id));
                   const updateRow = (change: Partial<{ user_id: string; scoring_type: ScoringType }>) => {
@@ -3131,7 +3165,7 @@ export default function Page() {
                     }}
                   >Save Judge Group</button>
                 </div>
-              </div>
+              </div> : <p className="division-empty-state">Add a division to configure its assigned judges.</p>}
             </section>
             <section className="panel records progress-overview">
               <div className="panel-heading">
@@ -3187,10 +3221,11 @@ export default function Page() {
                 <h3>Competitor Roster</h3>
                 <button
                   className="primary"
+                  disabled={!allDivisions.length}
                   onClick={() =>
                     setCompetitorEdit({
                       name: "",
-                      division: "Individual Open",
+                      division: allDivisions[0] ?? "",
                       position: state.competitors.length + 1,
                       status: "upcoming",
                       dq: false,
@@ -3657,6 +3692,39 @@ export default function Page() {
               <div className="dialog-actions">
                 <button type="button" onClick={() => { setAccountDeleteTarget(null); setAccountDeleteConfirmation(""); }}>Cancel</button>
                 <button type="button" className="danger-button" disabled={!confirmed || demo} onClick={() => void manage("remove_user", { id: target.id, confirmation: accountDeleteConfirmation })}>Permanently Delete Account</button>
+              </div>
+            </>;
+          })()}
+        </Dialog>
+      )}
+      {divisionDeleteTarget && (
+        <Dialog title="Permanently Delete Division?" close={() => { setDivisionDeleteTarget(""); setDivisionDeleteConfirmation(""); }}>
+          {(() => {
+            const name = divisionDeleteTarget;
+            const competitorIds = new Set((state?.competitors ?? []).filter((competitor) => competitor.division === name).map((competitor) => competitor.id));
+            const competitorCount = competitorIds.size;
+            const divisionSubmissions = (state?.submissions ?? []).filter((submission) => competitorIds.has(submission.competitor_id));
+            const submittedCount = divisionSubmissions.filter((submission) => submission.finished).length;
+            const pendingOfflineCount = (workspace?.queue ?? []).filter((operation) => competitorIds.has(operation.competitor_id)).length;
+            const hasActive = (state?.competitors ?? []).some((competitor) => competitorIds.has(competitor.id) && competitor.status === "active");
+            const confirmed = divisionDeleteConfirmation === name || divisionDeleteConfirmation === "DELETE DIVISION";
+            return <>
+              <p className="danger-warning">Division: <b>{name}</b></p>
+              <dl className="division-delete-impact" aria-label="Deletion impact">
+                <div><dt>Competitors</dt><dd>{competitorCount}</dd></div>
+                <div><dt>Submitted scores</dt><dd>{submittedCount}</dd></div>
+                {pendingOfflineCount ? <div><dt>Pending actions on this device</dt><dd>{pendingOfflineCount}</dd></div> : null}
+              </dl>
+              <p className="account-delete-impact" role="alert">
+                This permanently deletes the division, its competitors, assignments, submissions, technical events, deductions, scoring-window records, and ranking inputs. Judge accounts and other divisions will not be changed.{hasActive ? " The active competitor will be cleared." : ""}{pendingOfflineCount ? " Pending offline actions for this division will no longer sync." : " Judges with unsynced offline work for this division will not be able to sync it after deletion."} This cannot be undone.
+              </p>
+              <label>
+                Type <b>{name}</b> or <b>DELETE DIVISION</b> to confirm
+                <input value={divisionDeleteConfirmation} onChange={(event) => setDivisionDeleteConfirmation(event.target.value)} autoComplete="off" />
+              </label>
+              <div className="dialog-actions">
+                <button type="button" onClick={() => { setDivisionDeleteTarget(""); setDivisionDeleteConfirmation(""); }}>Cancel</button>
+                <button type="button" className="danger-button" disabled={!confirmed || demo} onClick={() => void manage("remove_division", { name, confirmation: divisionDeleteConfirmation })}>Permanently Delete Division</button>
               </div>
             </>;
           })()}

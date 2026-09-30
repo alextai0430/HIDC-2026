@@ -1284,6 +1284,44 @@ test("organizer permanently deletes accounts with or without score history throu
   assert.match((await denied.json()).error, /Organizer access required/);
 });
 
+test("division deletion requires an organizer and calls the transactional deletion RPC", async () => {
+  const divisionOutcome = { division: "Practice Division", competitors: 2, submissions: 6, submitted_scores: 4, activeCompetitorCleared: true };
+  let rpcArgs: Record<string, unknown> | undefined;
+  const client = {
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      assert.equal(name, "delete_division");
+      rpcArgs = args;
+      return { data: divisionOutcome, error: null };
+    },
+  };
+  const response = await route("manage", alex, client).POST(request({
+    action: "remove_division",
+    data: { name: "Practice Division", confirmation: "DELETE DIVISION" },
+  }));
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  assert.deepEqual(rpcArgs, {
+    p_actor: alex.id,
+    p_division: "Practice Division",
+    p_confirmation: "DELETE DIVISION",
+  });
+  assert.deepEqual(await response.json(), { ok: true, divisionOutcome });
+
+  const denied = await route("manage", judges[0], {
+    rpc: async () => { throw new Error("A judge must not reach division deletion"); },
+  }).POST(request({ action: "remove_division", data: { name: "Practice Division", confirmation: "DELETE DIVISION" } }));
+  assert.equal(denied.status, 400);
+  assert.match((await denied.json()).error, /Organizer access required/);
+
+  const invalid = await route("manage", alex, {
+    rpc: async () => ({ data: null, error: { message: "Type the exact division name or DELETE DIVISION to confirm permanent deletion" } }),
+  }).POST(request({
+    action: "remove_division",
+    data: { name: "Practice Division", confirmation: "no" },
+  }));
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json()).error, /Type the exact division name/);
+});
+
 test("administrator snapshot is sanitized for offline storage without losing Judge 1 pending work", async () => {
   const own: Submission = {
     id: crypto.randomUUID(),

@@ -240,42 +240,36 @@ export default function TechnicalPointConfiguration({
       ) : null}
       {!loading && !error && draft ? (
         <>
-          <div className="point-config-base-grid">
+          <div className="point-config-trick-grid" aria-label="Base trick point values">
+            <div className="grid-label" />
+            {["1D", "2D", "3D", "4D", "VD"].map((dimension) => (
+              <div className="column-label" key={dimension}>
+                {dimension}
+                <span>{dimension === "VD" ? "VERTICAL" : `${dimension[0]} DIABOLO${dimension[0] === "1" ? "" : "S"}`}</span>
+              </div>
+            ))}
             {Object.entries(tricks).map(([category, dimensions]) => (
-              <fieldset key={category} className="point-config-group" data-category={category}>
-                <legend>{category === "#" ? "# · Toss" : category}</legend>
-                <div className="point-config-fields">
-                  {dimensions.map((dimension) => (
-                    <label key={dimension}>
-                      <span>{category} · {dimension}</span>
-                      <input
-                        type="number"
-                        min="0"
-                        max="1000"
-                        step="0.1"
-                        value={draft.bases[category]?.[dimension] ?? ""}
-                        onChange={(event) => setValue("bases", dimension, event.target.value, category)}
-                        aria-label={`${category} ${dimension} base points`}
-                        disabled={loading || busy}
-                      />
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
+              <div className="point-config-trick-row" data-category={category} key={category}>
+                <div className="row-label">{category}</div>
+                {["1D", "2D", "3D", "4D", "VD"].map((dimension) => dimensions.includes(dimension) ? (
+                  <label className="point-config-trick-tile" key={dimension}>
+                    <span className="point-config-trick-title"><b>{category}</b><b>{dimension}</b></span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="1000"
+                      step="0.1"
+                      value={draft.bases[category]?.[dimension] ?? ""}
+                      onChange={(event) => setValue("bases", dimension, event.target.value, category)}
+                      aria-label={`${category} ${dimension} base points`}
+                      disabled={loading || busy}
+                    />
+                  </label>
+                ) : <div className="unavailable" key={dimension} aria-hidden="true">—</div>)}
+              </div>
             ))}
           </div>
           <div className="point-config-advanced">
-            <details open data-category="deduction">
-              <summary>Deduction Values</summary>
-              <div className="point-config-fields" data-category="deduction">
-                {deductions.map((deduction) => (
-                  <label key={deduction}>
-                    <span>{deduction}</span>
-                    <input type="number" min="-1000" max="0" step="0.1" value={draft.deductions[deduction] ?? ""} onChange={(event) => setValue("deductions", deduction, event.target.value)} aria-label={`${deduction} value`} disabled={busy} />
-                  </label>
-                ))}
-              </div>
-            </details>
             <details data-category="level">
               <summary>Level Multipliers</summary>
               <div className="point-config-fields" data-category="level">
@@ -305,6 +299,17 @@ export default function TechnicalPointConfiguration({
                   <label key={execution}>
                     <span>{executionLabels[execution]}</span>
                     <input type="number" min="0.01" max="100" step="0.01" value={draft.executions[execution] ?? ""} onChange={(event) => setValue("executions", execution, event.target.value)} aria-label={`${execution} multiplier`} disabled={busy} />
+                  </label>
+                ))}
+              </div>
+            </details>
+            <details data-category="deduction">
+              <summary>Major Deductions</summary>
+              <div className="point-config-fields" data-category="deduction">
+                {deductions.map((deduction) => (
+                  <label key={deduction}>
+                    <span>{deduction}</span>
+                    <input type="number" min="-1000" max="0" step="0.1" value={draft.deductions[deduction] ?? ""} onChange={(event) => setValue("deductions", deduction, event.target.value)} aria-label={`${deduction} value`} disabled={busy} />
                   </label>
                 ))}
               </div>
