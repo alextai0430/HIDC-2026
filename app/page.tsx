@@ -3837,6 +3837,7 @@ export default function Page() {
           close={() => { setUserEdit(null); setAccountFormError(""); }}
         >
           <form
+            autoComplete="off"
             onSubmit={(e) => {
               e.preventDefault();
               setAccountFormError("");
@@ -3896,6 +3897,7 @@ export default function Page() {
               <PasswordField
                 minLength={6}
                 required={userEdit.mode === "create"}
+                autoComplete="new-password"
                 value={userEdit.password}
                 onChange={(e) =>
                   setUserEdit({ ...userEdit, password: e.target.value })

@@ -1,16 +1,21 @@
 "use client";
 
-import { useState, type InputHTMLAttributes } from "react";
+import React, { useState, type InputHTMLAttributes } from "react";
 import { Eye, EyeOff } from "lucide-react";
 
 type PasswordFieldProps = Omit<InputHTMLAttributes<HTMLInputElement>, "type">;
 
 export function PasswordField(props: PasswordFieldProps) {
   const [visible, setVisible] = useState(false);
+  const { autoComplete = "new-password", ...inputProps } = props;
 
   return (
     <span className="password-field">
-      <input {...props} type={visible ? "text" : "password"} />
+      <input
+        {...inputProps}
+        autoComplete={autoComplete}
+        type={visible ? "text" : "password"}
+      />
       <button
         className="password-visibility-toggle"
         type="button"

@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { PasswordField } from "../app/components/password-field";
 import { usernameSchema, internalAddress } from "../lib/usernames";
 import { canManage, isAssignedJudge, profileCanScoreType, scoringTabs } from "../lib/access";
 import type { Profile } from "../lib/model";
@@ -11,6 +14,21 @@ test("usernames normalize and reject email identifiers or unsafe characters", ()
   const address = internalAddress("Judge_1");
   assert.match(address, /^judge_1\.[a-f0-9-]+@hidc\.internal$/);
   assert.notEqual(address, internalAddress("judge_1"));
+});
+
+test("password fields default to new-password autofill and preserve explicit login hints", () => {
+  const newPassword = renderToStaticMarkup(
+    createElement(PasswordField, { value: "", onChange: () => {} }),
+  );
+  const loginPassword = renderToStaticMarkup(
+    createElement(PasswordField, {
+      autoComplete: "current-password",
+      value: "",
+      onChange: () => {},
+    }),
+  );
+  assert.match(newPassword, /autoComplete="new-password"/);
+  assert.match(loginPassword, /autoComplete="current-password"/);
 });
 
 test("admin permission follows the account in every build mode", () => {
