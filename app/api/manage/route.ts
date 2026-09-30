@@ -1,9 +1,42 @@
 import { z } from "zod";
-import { identity, failure } from "@/lib/server";
+import { HttpError, identity, failure } from "@/lib/server";
 import { canManage } from "@/lib/access";
 import { usernameSchema, internalAddress } from "@/lib/usernames";
 
 const accountRole = z.enum(["technical_judge", "performance_judge", "organizer"]);
+
+function authCreationFailure(error: unknown): HttpError {
+  const candidate = error as { code?: string; message?: string };
+  const description = `${candidate?.code ?? ""} ${candidate?.message ?? ""}`.toLowerCase();
+  if (/already.*(exist|registered)|duplicate|email_exists|user_exists/.test(description))
+    return new HttpError("Username already exists.", 409);
+  if (/password|weak_password/.test(description))
+    return new HttpError("Password is weak or invalid. Use at least 6 characters and meet the password rules.", 400);
+  return new HttpError("Failed to create the login account. Check the Auth service and try again.", 400);
+}
+
+function parseAccountInput<T>(schema: z.ZodType<T>, input: unknown): T {
+  const parsed = schema.safeParse(input);
+  if (!parsed.success)
+    throw new HttpError(parsed.error.issues.map((issue) => issue.message).join(" "), 400);
+  return parsed.data;
+}
+
+async function removeOrDisableUnprofiledAuthUser(client: any, id: string): Promise<string | null> {
+  try {
+    const removed = await client.auth.admin.deleteUser(id);
+    if (!removed.error) return null;
+  } catch {
+    // Fall through to a long-term ban so a profile-less login cannot be used.
+  }
+  try {
+    const banned = await client.auth.admin.updateUserById(id, { ban_duration: "876000h" });
+    if (!banned.error) return "The orphan Auth account was disabled, but could not be removed; organizer cleanup is required.";
+  } catch {
+    // Report the failed rollback below without exposing Auth identifiers.
+  }
+  return "The new Auth account could not be removed or disabled. Contact the system administrator immediately.";
+}
 
 export async function POST(req: Request) {
   try {
@@ -60,86 +93,130 @@ export async function POST(req: Request) {
       const input = z.object({ id: z.string().uuid() }).parse(data);
       const { error } = await client.rpc("delete_competitor", { p_actor: profile.id, p_id: input.id });
       if (error) throw new Error(error.message);
-    } else if (action === "user") {
-      const u = z.object({
-        id: z.string().uuid().optional(),
-        name: z.string().trim().min(1).max(100),
+    } else if (action === "create_user" || action === "user") {
+      // `user` remains a create-only alias for older clients. It deliberately
+      // rejects `id`, so an old/stale create form can never fall into updates.
+      const u = parseAccountInput(z.object({
+        name: z.string().trim().min(1, "Enter a display name.").max(100),
         username: usernameSchema,
         role: accountRole,
-        password: z.string().min(6).max(256).optional(),
-      }).parse(data);
-      if (!u.id && !u.password) throw new Error("A password is required for a new account");
+        password: z.string().min(6, "Password must be at least 6 characters.").max(256, "Password is too long."),
+      }).strict(), data);
+      if (["alexandertai", "organizer"].includes(u.username))
+        throw new HttpError("That username is reserved for a protected account.", 409);
 
-      const duplicate = await client.from("profiles").select("id").eq("username", u.username)
-        .neq("id", u.id ?? "00000000-0000-0000-0000-000000000000").maybeSingle();
+      // usernameSchema lowercases before lookup and the database constraint is
+      // lowercase-only, making this check case-insensitive for accepted input.
+      const duplicate = await client.from("profiles").select("id")
+        .eq("username", u.username).maybeSingle();
       if (duplicate.error) throw duplicate.error;
-      if (duplicate.data) throw new Error("Username is already in use");
+      if (duplicate.data) throw new HttpError("Username already exists.", 409);
 
-      const priorResult = u.id
-        ? await client.from("profiles").select("id,name,username,role,active,is_admin,archived").eq("id", u.id).maybeSingle()
-        : null;
-      if (priorResult?.error) throw priorResult.error;
-      const prior = priorResult?.data ?? null;
-      if (u.id && !prior) throw new Error("Account not found");
-      if (prior?.username?.toLowerCase() === "alexandertai") {
-        if (u.username.toLowerCase() !== "alexandertai" || u.role !== "organizer")
-          throw new Error("alexandertai must remain the protected full-access Organizer account");
+      let id: string | undefined;
+      try {
+        const created = await client.auth.admin.createUser({
+          email: internalAddress(u.username), password: u.password, email_confirm: true,
+        });
+        if (created.error) throw authCreationFailure(created.error);
+        id = created.data.user?.id;
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        throw authCreationFailure(error);
       }
-      if (prior?.role === "organizer" && prior.active && u.role !== "organizer") {
+      if (!id || id === profile.id)
+        throw new Error("Auth did not return a distinct new account ID; no existing profile was changed.");
+
+      let profileInsertError: { code?: string } | null = null;
+      try {
+        const inserted = await client.from("profiles").insert({
+          id, name: u.name, username: u.username, role: u.role, active: true,
+          archived: false, is_admin: u.role === "organizer",
+        });
+        profileInsertError = inserted.error;
+      } catch (error) {
+        profileInsertError = error as { code?: string };
+      }
+      if (profileInsertError) {
+        const cleanup = await removeOrDisableUnprofiledAuthUser(client, id);
+        if (profileInsertError.code === "23505")
+          throw new HttpError(cleanup ? `Username already exists. ${cleanup}` : "Username already exists.", 409);
+        throw new HttpError(cleanup
+          ? `Profile creation failed. ${cleanup}`
+          : "Profile creation failed; the temporary Auth account was removed. Please retry or contact the organizer.", 500);
+      }
+
+      const audit = await client.from("audit").insert({
+        user_id: profile.id, action: "account_create", prior: null,
+        next: { id, name: u.name, username: u.username, role: u.role },
+      });
+      if (audit.error) throw new Error("Account created, but audit logging failed. Contact the organizer.");
+      accountOutcome = { createdAccount: { id, username: u.username, role: u.role } };
+    } else if (action === "update_user") {
+      const u = parseAccountInput(z.object({
+        id: z.string().uuid(),
+        name: z.string().trim().min(1, "Enter a display name.").max(100),
+        username: usernameSchema,
+        role: accountRole,
+        password: z.string().min(6, "Password must be at least 6 characters.").max(256, "Password is too long.").optional(),
+      }).strict(), data);
+      const priorResult = await client.from("profiles").select("id,name,username,role,active,is_admin,archived")
+        .eq("id", u.id).maybeSingle();
+      if (priorResult.error) throw priorResult.error;
+      const prior = priorResult.data;
+      if (!prior) throw new Error("Account not found");
+      if (prior.username?.toLowerCase() === "alexandertai") {
+        throw new HttpError("alexandertai is protected from Server Access Control account changes.", 403);
+      } else if (prior.username?.toLowerCase() === "organizer") {
+        throw new HttpError("The organizer account is protected from Server Access Control account changes.", 403);
+      } else if (["alexandertai", "organizer"].includes(u.username)) {
+        throw new HttpError("That username is reserved for a protected account.", 409);
+      }
+      const duplicate = await client.from("profiles").select("id").eq("username", u.username)
+        .neq("id", u.id).maybeSingle();
+      if (duplicate.error) throw duplicate.error;
+      if (duplicate.data) throw new HttpError("Username already exists.", 409);
+      if (prior.role === "organizer" && prior.active && u.role !== "organizer") {
         const { count, error } = await client.from("profiles").select("id", { count: "exact", head: true }).eq("role", "organizer").eq("active", true);
         if (error) throw error;
         if ((count ?? 0) <= 1) throw new Error("At least one active Organizer account must remain");
       }
 
-      let id = u.id;
-      if (!id) {
-        const created = await client.auth.admin.createUser({
-          email: internalAddress(u.username), password: u.password!, email_confirm: true,
-        });
-        if (created.error) throw created.error;
-        id = created.data.user.id;
-        const inserted = await client.from("profiles").insert({
-          id, name: u.name, username: u.username, role: u.role, active: true,
-          archived: false, is_admin: u.role === "organizer",
-        });
-        if (inserted.error) {
-          await client.auth.admin.deleteUser(id);
-          throw inserted.error;
+      if (u.password) {
+        const updated = await client.auth.admin.updateUserById(u.id, { password: u.password });
+        if (updated.error) {
+          const message = `${updated.error.message ?? ""}`.toLowerCase();
+          if (/password|weak_password/.test(message))
+            throw new HttpError("Password is weak or invalid. Use at least 6 characters and meet the password rules.", 400);
+          throw new HttpError("Failed to update the login password. No profile changes were saved.", 400);
         }
-        const audit = await client.from("audit").insert({
-          user_id: profile.id, action: "account_create", prior: null,
-          next: { id, name: u.name, username: u.username, role: u.role },
-        });
-        if (audit.error) throw new Error("Account created, but audit logging failed. Contact the organizer.");
-      } else {
-        if (u.password) {
-          const updated = await client.auth.admin.updateUserById(id, { password: u.password });
-          if (updated.error) throw updated.error;
-        }
-        if (prior!.role !== u.role) {
-          const changed = await client.rpc("change_judge_account_role", {
-            p_actor: profile.id, p_target: id, p_role: u.role,
-          });
-          if (changed.error) throw new Error(changed.error.message);
-        }
-        const updated = await client.from("profiles").update({
-          name: u.name, username: u.username,
-          is_admin: u.role === "organizer",
-        }).eq("id", id).select("id").single();
-        if (updated.error) throw updated.error;
-        const audit = await client.from("audit").insert({
-          user_id: profile.id, action: "account_update",
-          prior: { id, name: prior!.name, username: prior!.username, role: prior!.role, active: prior!.active },
-          next: { id, name: u.name, username: u.username, role: u.role, active: prior!.active },
-        });
-        if (audit.error) throw new Error("Account updated, but audit logging failed. Contact the organizer.");
       }
+      if (prior.role !== u.role) {
+        const changed = await client.rpc("change_judge_account_role", {
+          p_actor: profile.id, p_target: u.id, p_role: u.role,
+        });
+        if (changed.error) throw new Error(changed.error.message);
+      }
+      const updated = await client.from("profiles").update({
+        name: u.name, username: u.username,
+        is_admin: u.role === "organizer",
+      }).eq("id", u.id).select("id").single();
+      if (updated.error) {
+        if (updated.error.code === "23505") throw new HttpError("Username already exists.", 409);
+        throw updated.error;
+      }
+      const audit = await client.from("audit").insert({
+        user_id: profile.id, action: "account_update",
+        prior: { id: u.id, name: prior.name, username: prior.username, role: prior.role, active: prior.active },
+        next: { id: u.id, name: u.name, username: u.username, role: u.role, active: prior.active },
+      });
+      if (audit.error) throw new Error("Account updated, but audit logging failed. Contact the organizer.");
     } else if (action === "reactivate_user") {
       const input = z.object({ id: z.string().uuid() }).parse(data);
       const target = await client.from("profiles").select("id,username").eq("id", input.id).maybeSingle();
       if (target.error) throw target.error;
       if (!target.data) throw new Error("Account not found");
-      if (target.data.username?.toLowerCase() === "alexandertai") throw new Error("alexandertai is the protected full-access Organizer account");
+      if (["alexandertai", "organizer"].includes(target.data.username?.toLowerCase() ?? ""))
+        throw new HttpError("This account is protected from Server Access Control changes.", 403);
       const { error } = await client.rpc("reactivate_judge_account", { p_actor: profile.id, p_target: input.id });
       if (error) throw new Error(error.message);
     } else if (action === "remove_user") {
@@ -147,7 +224,8 @@ export async function POST(req: Request) {
       const target = await client.from("profiles").select("id,username,name,role,active,avatar_path").eq("id", input.id).maybeSingle();
       if (target.error) throw target.error;
       if (!target.data) throw new Error("Account not found");
-      if (target.data.username?.toLowerCase() === "alexandertai") throw new Error("alexandertai is the protected full-access Organizer account");
+      if (["alexandertai", "organizer"].includes(target.data.username?.toLowerCase() ?? ""))
+        throw new HttpError("This is a protected Organizer account and cannot be deleted.", 403);
       if (input.confirmation !== target.data.username && input.confirmation !== "DELETE JUDGE")
         throw new Error("Type the exact username or DELETE JUDGE to confirm permanent deletion.");
       const history = await client.from("submissions").select("id", { count: "exact", head: true }).eq("user_id", input.id);

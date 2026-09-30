@@ -18,6 +18,7 @@ import {
 } from "../lib/local";
 import type { Profile, Submission } from "../lib/model";
 import { DEFAULT_SCORING_RULES } from "../lib/scoring-config";
+import * as usernameUtils from "../lib/usernames";
 import {
   detailExportRows,
   detailSubmissions,
@@ -432,7 +433,7 @@ test("alexandertai remains protected from account role or identity changes", asy
     };
     const response = await route("manage", alex, client).POST(
       request({
-        action: "user",
+        action: "update_user",
         data: {
           id: target.id,
           username: "renamed",
@@ -442,11 +443,47 @@ test("alexandertai remains protected from account role or identity changes", asy
         },
       }),
     );
-    assert.equal(response.status, 400);
+    assert.equal(response.status, 403);
     assert.match(
       (await response.json()).error,
-      /alexandertai must remain the protected full-access Organizer/,
+      /alexandertai is protected from Server Access Control account changes/,
     );
+  }
+});
+
+test("the alexandertai and organizer accounts cannot be edited or deleted in Server Access Control", async () => {
+  for (const username of ["alexandertai", "organizer"]) {
+    const target = { ...alex, id: crypto.randomUUID(), username, name: username, role: "organizer" as const };
+    let profileWrites = 0;
+    let authDeletes = 0;
+    const client = {
+      from: (table: string) => {
+        const builder: any = {
+          select: () => builder,
+          eq: () => builder,
+          maybeSingle: async () => ({ data: table === "profiles" ? target : null, error: null }),
+          update: () => { profileWrites += 1; return builder; },
+          single: async () => ({ data: target, error: null }),
+        };
+        return builder;
+      },
+      auth: { admin: {
+        updateUserById: async () => { profileWrites += 1; return { error: null }; },
+        deleteUser: async () => { authDeletes += 1; return { error: null }; },
+      } },
+    };
+    const edited = await route("manage", alex, client).POST(request({
+      action: "update_user", data: { id: target.id, name: "Changed", username, role: "organizer" },
+    }));
+    assert.equal(edited.status, 403);
+    assert.match((await edited.json()).error, /protected from Server Access Control/i);
+    const deleted = await route("manage", alex, client).POST(request({
+      action: "remove_user", data: { id: target.id, confirmation: "DELETE JUDGE" },
+    }));
+    assert.equal(deleted.status, 403);
+    assert.match((await deleted.json()).error, /protected Organizer account/i);
+    assert.equal(profileWrites, 0);
+    assert.equal(authDeletes, 0);
   }
 });
 
@@ -956,7 +993,7 @@ test("performance points stay masked until Admin unlock and Show Points are both
   assert.equal((revealed[0] as Record<string, unknown>).Control, 5);
 });
 
-test("organizers can create each supported account role without numbered slots", async () => {
+test("organizers create each supported role as a new account without numbered slots", async () => {
   for (const role of ["technical_judge", "performance_judge", "organizer"] as const) {
     const writes: any[] = [];
     const targetId = crypto.randomUUID();
@@ -984,14 +1021,214 @@ test("organizers can create each supported account role without numbered slots",
       },
     };
     const response = await route("manage", alex, client).POST(request({
-      action: "user",
+      action: "create_user",
       data: { name: "New Judge", username: `new_${role}`, role, password: "123456" },
     }));
     assert.equal(response.status, 200, JSON.stringify(await response.json()));
     const values = writes.find(([table]) => table === "profiles")[1];
     assert.equal(values.role, role);
+    assert.equal(values.id, targetId);
+    assert.notEqual(values.id, alex.id);
     assert.equal(values.slot, undefined);
     assert.equal(values.is_admin, role === "organizer");
+  }
+});
+
+test("creating an account rejects an accidental profile id instead of editing the signed-in organizer", async () => {
+  let authCreates = 0;
+  let profileInserts = 0;
+  let authUpdates = 0;
+  const client = {
+    from: (table: string) => ({
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+      insert: async () => { if (table === "profiles") profileInserts += 1; return { error: null }; },
+    }),
+    auth: { admin: {
+      createUser: async () => { authCreates += 1; return { data: { user: { id: crypto.randomUUID() } } }; },
+      updateUserById: async () => { authUpdates += 1; return { error: null }; },
+    } },
+  };
+  const response = await route("manage", alex, client).POST(request({
+    action: "create_user",
+    data: { id: alex.id, name: "New Judge", username: "new_judge", role: "technical_judge", password: "123456" },
+  }));
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /Unrecognized key.*id/i);
+  assert.equal(authCreates, 0);
+  assert.equal(profileInserts, 0);
+  assert.equal(authUpdates, 0);
+});
+
+test("account creation validates reserved, duplicate, malformed, and weak credentials before profile writes", async () => {
+  let authCreates = 0;
+  let profileInserts = 0;
+  const existing = { id: crypto.randomUUID(), username: "existing_judge" };
+  const client = {
+    from: (table: string) => {
+      const builder: any = {
+        select: () => builder,
+        eq: (_column: string, value: string) => { builder.username = value; return builder; },
+        maybeSingle: async () => ({ data: builder.username === existing.username ? existing : null, error: null }),
+        insert: async () => { if (table === "profiles") profileInserts += 1; return { error: null }; },
+      };
+      return builder;
+    },
+    auth: { admin: { createUser: async () => { authCreates += 1; return { data: { user: { id: crypto.randomUUID() } } }; } } },
+  };
+  const cases = [
+    { username: "ORGANIZER", password: "strong-test-pass", status: 409, message: /reserved for a protected account/i },
+    { username: "EXISTING_JUDGE", password: "strong-test-pass", status: 409, message: /username already exists/i },
+    { username: "xy", password: "strong-test-pass", status: 400, message: /3–32 letters/i },
+    { username: "valid_judge", password: "123", status: 400, message: /at least 6 characters/i },
+  ];
+  for (const item of cases) {
+    const response = await route("manage", alex, client).POST(request({
+      action: "create_user",
+      data: { name: "New Judge", username: item.username, role: "technical_judge", password: item.password },
+    }));
+    assert.equal(response.status, item.status);
+    assert.match((await response.json()).error, item.message);
+  }
+  assert.equal(authCreates, 0);
+  assert.equal(profileInserts, 0);
+});
+
+test("Auth password-policy failures are clear and profile failures remove the new Auth identity", async () => {
+  let authDeletes = 0;
+  let authBans = 0;
+  const passwordRejected = await route("manage", alex, {
+    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }),
+    auth: { admin: { createUser: async () => ({ error: { code: "weak_password", message: "Password should be stronger" } }) } },
+  }).POST(request({ action: "create_user", data: { name: "Weak Test", username: "weak_test", role: "technical_judge", password: "123456" } }));
+  assert.equal(passwordRejected.status, 400);
+  assert.match((await passwordRejected.json()).error, /Password is weak or invalid/i);
+
+  const id = crypto.randomUUID();
+  const profileRejected = await route("manage", alex, {
+    from: (table: string) => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: async () => ({ data: null, error: null }),
+        insert: async () => table === "profiles" ? { error: { code: "XX000", message: "profile database unavailable" } } : { error: null },
+      };
+      return builder;
+    },
+    auth: { admin: {
+      createUser: async () => ({ data: { user: { id } } }),
+      deleteUser: async (deletedId: string) => { assert.equal(deletedId, id); authDeletes += 1; return { error: null }; },
+      updateUserById: async () => { authBans += 1; return { error: null }; },
+    } },
+  }).POST(request({ action: "create_user", data: { name: "Profile Failure", username: "profile_failure", role: "technical_judge", password: "strong-test-pass" } }));
+  assert.equal(profileRejected.status, 500);
+  assert.match((await profileRejected.json()).error, /temporary Auth account was removed/i);
+  assert.equal(authDeletes, 1);
+  assert.equal(authBans, 0);
+
+  let fallbackBans = 0;
+  const unremovableProfileRejected = await route("manage", alex, {
+    from: (table: string) => {
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        maybeSingle: async () => ({ data: null, error: null }),
+        insert: async () => table === "profiles" ? { error: { code: "XX000", message: "database unavailable" } } : { error: null },
+      };
+      return builder;
+    },
+    auth: { admin: {
+      createUser: async () => ({ data: { user: { id } } }),
+      deleteUser: async () => ({ error: { message: "temporary auth failure" } }),
+      updateUserById: async (targetId: string, values: { ban_duration: string }) => {
+        assert.equal(targetId, id);
+        assert.equal(values.ban_duration, "876000h");
+        fallbackBans += 1;
+        return { error: null };
+      },
+    } },
+  }).POST(request({ action: "create_user", data: { name: "Profile Failure", username: "profile_failure", role: "technical_judge", password: "strong-test-pass" } }));
+  assert.equal(unremovableProfileRejected.status, 500);
+  assert.match((await unremovableProfileRejected.json()).error, /orphan Auth account was disabled/i);
+  assert.equal(fallbackBans, 1);
+});
+
+test("new accounts receive separate Auth/profile IDs and can sign in by their new username", async () => {
+  const authUsers = new Map<string, { id: string; email: string; password: string }>();
+  const profiles: Array<Record<string, unknown>> = [structuredClone(alex)];
+  const auditRows: unknown[] = [];
+  let protectedAccountUpdates = 0;
+  const client = {
+    from: (table: string) => {
+      const filters: Record<string, unknown> = {};
+      const builder: any = {
+        select: () => builder,
+        eq: (key: string, value: unknown) => { filters[key] = value; return builder; },
+        maybeSingle: async () => ({ data: profiles.find((row) => Object.entries(filters).every(([key, value]) => row[key] === value)) ?? null, error: null }),
+        single: async () => ({ data: profiles.find((row) => Object.entries(filters).every(([key, value]) => row[key] === value)) ?? null, error: null }),
+        insert: async (row: Record<string, unknown>) => {
+          if (table === "profiles") profiles.push(structuredClone(row));
+          else if (table === "audit") auditRows.push(structuredClone(row));
+          return { data: row, error: null };
+        },
+      };
+      return builder;
+    },
+    auth: {
+      admin: {
+        createUser: async (input: { email: string; password: string }) => {
+          const id = crypto.randomUUID();
+          authUsers.set(id, { id, email: input.email, password: input.password });
+          return { data: { user: { id, email: input.email } }, error: null };
+        },
+        getUserById: async (id: string) => ({ data: { user: authUsers.get(id) ?? null }, error: null }),
+        updateUserById: async (id: string) => {
+          if (id === alex.id) protectedAccountUpdates += 1;
+          return { error: null };
+        },
+        deleteUser: async (id: string) => { authUsers.delete(id); return { error: null }; },
+      },
+      signInWithPassword: async ({ email, password }: { email: string; password: string }) => {
+        const user = [...authUsers.values()].find((candidate) => candidate.email === email && candidate.password === password);
+        return user
+          ? { data: { session: { access_token: `access:${user.id}`, refresh_token: `refresh:${user.id}` } }, error: null }
+          : { data: { session: null }, error: { message: "Invalid login" } };
+      },
+    },
+  };
+  const originalAlex = structuredClone(alex);
+  const created: Array<{ id: string; username: string; password: string; role: string }> = [];
+  for (const role of ["technical_judge", "performance_judge", "organizer"] as const) {
+    const username = `new_${role}`;
+    const password = "Strong-test-password-46";
+    const response = await route("manage", alex, client).POST(request({
+      action: "create_user", data: { name: `New ${role}`, username, role, password },
+    }));
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    const body = await response.json();
+    const account = body.createdAccount;
+    assert.ok(account?.id);
+    assert.notEqual(account.id, alex.id);
+    assert.equal(account.username, username);
+    assert.equal(account.role, role);
+    const profile = profiles.find((row) => row.id === account.id);
+    assert.equal(profile?.username, username);
+    assert.equal(profile?.role, role);
+    assert.equal((authUsers.get(account.id)?.email ?? "").startsWith(`${username}.`), true);
+    created.push({ id: account.id, username, password, role });
+  }
+  assert.equal(new Set(created.map((account) => account.id)).size, 3);
+  assert.deepEqual(profiles.find((row) => row.id === alex.id), originalAlex);
+  assert.equal(protectedAccountUpdates, 0);
+  assert.equal(auditRows.length, 3);
+
+  const loginRoute = load("app/api/login/route.ts", {
+    "@/lib/server": { db: () => client },
+    "@/lib/usernames": usernameUtils,
+  });
+  for (const account of created) {
+    const response = await loginRoute.POST(request({ username: account.username.toUpperCase(), password: account.password }));
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    assert.ok((await response.json()).access_token.includes(account.id));
   }
 });
 

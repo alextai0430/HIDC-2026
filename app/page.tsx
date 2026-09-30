@@ -112,6 +112,42 @@ const executionControlLabels: Record<(typeof executionOptions)[number], string> 
   "E-3": "E−3",
 };
 
+type AccountFormState =
+  | {
+      mode: "create";
+      name: string;
+      username: string;
+      role: Profile["role"];
+      password: string;
+    }
+  | {
+      mode: "edit";
+      id: string;
+      name: string;
+      username: string;
+      role: Profile["role"];
+      password: string;
+    };
+
+function createAccountForm(): AccountFormState {
+  return { mode: "create", name: "", username: "", role: "technical_judge", password: "" };
+}
+
+function editAccountForm(profile: Profile): AccountFormState {
+  return {
+    mode: "edit",
+    id: profile.id,
+    name: profile.name,
+    username: profile.username ?? "",
+    role: profile.role === "performance_judge" || (profile.role === "judge" && (profile.slot ?? 1) > 3)
+      ? "performance_judge"
+      : profile.role === "organizer" || profile.role === "server_admin"
+        ? "organizer"
+        : "technical_judge",
+    password: "",
+  };
+}
+
 function SubmissionEventDetail({
   event,
   index,
@@ -308,11 +344,10 @@ export default function Page() {
     [competitorEdit, setCompetitorEdit] = useState<Partial<Competitor> | null>(
       null,
     ),
-    [userEdit, setUserEdit] = useState<
-      (Partial<Profile> & { username?: string; password?: string }) | null
-    >(null),
+    [userEdit, setUserEdit] = useState<AccountFormState | null>(null),
     [accountDeleteTarget, setAccountDeleteTarget] = useState<Profile | null>(null),
-    [accountDeleteConfirmation, setAccountDeleteConfirmation] = useState("");
+    [accountDeleteConfirmation, setAccountDeleteConfirmation] = useState(""),
+    [accountFormError, setAccountFormError] = useState("");
   const state = workspace?.snapshot;
   const profile = state?.profile;
   const server = !!profile && canManage(profile);
@@ -1547,9 +1582,9 @@ export default function Page() {
             ...(next.snapshot.assignments ?? []).filter((row) => row.division !== assignment.division),
             ...assignment.assignments.map((row) => ({ ...row, division: assignment.division })),
           ];
-        } else if (["user", "remove_user"].includes(action))
+        } else if (["user", "create_user", "update_user", "remove_user", "remove_division"].includes(action))
           throw new Error(
-            "Account changes require a connected Supabase project.",
+            "This action requires a connected Supabase project.",
           );
         await commit(next);
       } else {
@@ -1559,17 +1594,28 @@ export default function Page() {
             ? "Account permanently deleted. Submitted scores were preserved for authorized event records."
             : "Account and login permanently deleted.");
         } else if (action === "reactivate_user") setNotice("Legacy archived account reactivated.");
-        else setNotice(action === "user" ? "Account saved." : action === "assignments" ? "Division assignments saved." : action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
-        await refresh();
+        else setNotice(action === "create_user" ? "Account created." : action === "update_user" ? "Account updated." : action === "assignments" ? "Division assignments saved." : action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
+        try {
+          await refresh();
+        } catch (refreshError) {
+          if (action !== "create_user" && action !== "update_user") throw refreshError;
+          setNotice(action === "create_user"
+            ? "Account created. The account list could not refresh yet."
+            : "Account updated. The account list could not refresh yet.");
+          setSyncError((refreshError as Error).message);
+        }
       }
       setCompetitorEdit(null);
       setUserEdit(null);
+      setAccountFormError("");
       if (demo) setNotice(action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
       setAccountDeleteTarget(null);
       setAccountDeleteConfirmation("");
       return true;
     } catch (e) {
-      setSyncError((e as Error).message);
+      if (action === "create_user" || action === "update_user")
+        setAccountFormError((e as Error).message);
+      else setSyncError((e as Error).message);
       return false;
     }
   }
@@ -3239,17 +3285,13 @@ export default function Page() {
                   <Users size={16} /> Judge Accounts
                 </h3>
                 <button
-                  onClick={() =>
-                    setUserEdit({
-                      name: "",
-                      username: "",
-                      password: "",
-                      role: "technical_judge",
-                      active: true,
-                    })
-                  }
+                  type="button"
+                  onClick={() => {
+                    setAccountFormError("");
+                    setUserEdit(createAccountForm());
+                  }}
                 >
-                  <Plus size={15} /> Create Account
+                  <Plus size={15} /> Create Judge / Add User
                 </button>
               </div>
               {demo && (
@@ -3260,7 +3302,7 @@ export default function Page() {
               )}
               <div className="account-cards">
                 {(state.profiles ?? []).map((p) => {
-                  const protectedOrganizer = p.username?.toLowerCase() === "alexandertai";
+                  const protectedAccount = ["alexandertai", "organizer"].includes(p.username?.toLowerCase() ?? "");
                   return (
                     <article className={`account-card ${p.archived ? "archived" : ""}`} key={p.id}>
                       <div className="account-card-identity">
@@ -3272,14 +3314,14 @@ export default function Page() {
                       <div className="account-card-meta">
                         <span>{profileRoleLabel(p, profileScoringType(p))}</span>
                         <span className={p.archived ? "archived-label" : p.active ? "active-label" : "inactive-label"}>{p.archived ? "Archived · former judge" : p.active ? "Active" : "Inactive"}</span>
-                        {protectedOrganizer ? <span>Protected full-access account</span> : null}
+                        {protectedAccount ? <span>{p.username?.toLowerCase() === "alexandertai" ? "Protected full-access account" : "Protected Organizer account"}</span> : null}
                       </div>
                       <div className="account-card-actions">
-                      <button type="button" onClick={() => setUserEdit({ ...p, role: p.role === "performance_judge" || p.role === "judge" && (p.slot ?? 1) > 3 ? "performance_judge" : p.role === "organizer" || p.role === "server_admin" ? "organizer" : "technical_judge", username: p.username ?? "", password: "" })}>Manage Account</button>
+                      {!protectedAccount ? <button type="button" onClick={() => { setAccountFormError(""); setUserEdit(editAccountForm(p)); }}>Manage Account</button> : null}
                         {p.archived ? (
                           <button type="button" disabled={demo} onClick={() => void manage("reactivate_user", { id: p.id })}>Reactivate</button>
                         ) : null}
-                        {!protectedOrganizer && !p.archived ? (
+                        {!protectedAccount && !p.archived ? (
                           <button type="button" className="danger-button" onClick={() => { setAccountDeleteTarget(p); setAccountDeleteConfirmation(""); }}>Delete Account</button>
                         ) : null}
                       </div>
@@ -3725,16 +3767,21 @@ export default function Page() {
       )}
       {userEdit && (
         <Dialog
-          title={userEdit.id ? "Manage Account" : "Create Account"}
-          close={() => setUserEdit(null)}
+          title={userEdit.mode === "edit" ? "Manage Account" : "Create Account"}
+          close={() => { setUserEdit(null); setAccountFormError(""); }}
         >
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              const saveAccount = () => void manage("user", { ...userEdit, password: userEdit.password || undefined });
-              const newRole = userEdit.role ?? "technical_judge";
-              const removedAssignments = userEdit.id
-                ? (state?.assignments ?? []).filter((assignment) => assignment.user_id === userEdit.id && !profileCanScoreType({ ...userEdit, role: newRole, active: true } as Profile, assignmentScoringType(assignment)))
+              setAccountFormError("");
+              const saveAccount = () => void manage(
+                userEdit.mode === "create" ? "create_user" : "update_user",
+                userEdit.mode === "create"
+                  ? { name: userEdit.name, username: userEdit.username, role: userEdit.role, password: userEdit.password }
+                  : { id: userEdit.id, name: userEdit.name, username: userEdit.username, role: userEdit.role, password: userEdit.password || undefined },
+              );
+              const removedAssignments = userEdit.mode === "edit"
+                ? (state?.assignments ?? []).filter((assignment) => assignment.user_id === userEdit.id && !profileCanScoreType({ id: userEdit.id, name: userEdit.name, username: userEdit.username, role: userEdit.role, active: true }, assignmentScoringType(assignment)))
                 : [];
               if (removedAssignments.length) {
                 setModal({
@@ -3756,8 +3803,9 @@ export default function Page() {
               <input
                 type="text"
                 required
-                readOnly={userEdit.username?.toLowerCase() === "alexandertai"}
-                value={userEdit.username ?? ""}
+                autoComplete="off"
+                readOnly={userEdit.mode === "edit" && userEdit.username.toLowerCase() === "alexandertai"}
+                value={userEdit.username}
                 onChange={(e) =>
                   setUserEdit({ ...userEdit, username: e.target.value })
                 }
@@ -3767,7 +3815,7 @@ export default function Page() {
               Role
               <select
                 value={userEdit.role === "performance_judge" ? "performance_judge" : userEdit.role === "organizer" || userEdit.role === "server_admin" ? "organizer" : "technical_judge"}
-                disabled={userEdit.username?.toLowerCase() === "alexandertai"}
+                disabled={userEdit.mode === "edit" && userEdit.username.toLowerCase() === "alexandertai"}
                 onChange={(event) => setUserEdit({ ...userEdit, role: event.target.value as Profile["role"] })}
               >
                 <option value="technical_judge">Technical Judge</option>
@@ -3776,24 +3824,25 @@ export default function Page() {
               </select>
             </label>
             <label>
-              {userEdit.id
+              {userEdit.mode === "edit"
                 ? "New password (leave blank to keep)"
                 : "Password (6+ characters)"}
               <PasswordField
                 minLength={6}
-                required={!userEdit.id}
-                value={userEdit.password ?? ""}
+                required={userEdit.mode === "create"}
+                value={userEdit.password}
                 onChange={(e) =>
                   setUserEdit({ ...userEdit, password: e.target.value })
                 }
               />
             </label>
+            {accountFormError && <p className="error" role="alert">{accountFormError}</p>}
             <p>Division assignments are managed separately. Organizers are scoring judges only when explicitly assigned.</p>
             <div className="dialog-actions">
-              <button type="button" onClick={() => setUserEdit(null)}>
+              <button type="button" onClick={() => { setUserEdit(null); setAccountFormError(""); }}>
                 Cancel
               </button>
-              <button className="primary">Save Account</button>
+              <button className="primary">{userEdit.mode === "create" ? "Create Account" : "Save Account"}</button>
             </div>
           </form>
         </Dialog>
