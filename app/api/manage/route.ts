@@ -80,15 +80,20 @@ export async function POST(req: Request) {
       });
       if (error) throw new Error(error.message);
     } else if (action === "division") {
-      const name = z.string().trim().min(1).max(80).parse(data.name);
-      const existing = await client.from("divisions").select("name").eq("name", name).maybeSingle();
-      if (existing.error) throw new Error(existing.error.message);
-      if (existing.data) throw new Error("That division already exists. Select it from the Division list instead.");
-      const { error } = await client.from("divisions").insert({ name });
-      if (error?.code === "23505") throw new Error("That division already exists. Select it from the Division list instead.");
+      const input = z.object({
+        name: z.string().trim().min(1).max(80),
+        assignments: z.array(z.object({
+          slot: z.number().int().min(1).max(10),
+          user_id: z.string().uuid(),
+          scoring_type: z.enum(["technical", "performance"]),
+        })).min(2).max(10),
+      }).strict().parse(data);
+      const { error } = await client.rpc("create_division_with_roster", {
+        p_actor: profile.id,
+        p_division: input.name,
+        p_assignments: input.assignments,
+      });
       if (error) throw new Error(error.message);
-      const audit = await client.from("audit").insert({ user_id: profile.id, action: "division_create", next: { name } });
-      if (audit.error) throw new Error("Division created, but audit logging failed. Contact the organizer.");
     } else if (action === "remove_division") {
       const input = z.object({
         name: z.string().min(1).max(80).refine((name) => name.trim().length > 0),

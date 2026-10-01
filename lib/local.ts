@@ -2,6 +2,7 @@ import { openDB } from "idb";
 import { Operation, Snapshot, Submission } from "./model";
 import { normalizeAppearancePreferences, type AppearancePreferences } from "./appearance";
 import { parsePerformancePayload } from "./performance-patch";
+import { canViewOwnPerformancePoints } from "./scoped";
 const database = () =>
   openDB("hidc-2026", 1, {
     upgrade(db) {
@@ -47,11 +48,12 @@ export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
   snapshot.submissions = snapshot.submissions
     .filter((s) => s.user_id === snapshot.profile.id)
     .map((s) => {
-      delete s.total;
+      const ownPerformance = canViewOwnPerformancePoints(snapshot.profile, s);
+      if (!ownPerformance) delete s.total;
       s.events.forEach((e) => {
         delete e.value;
       });
-      s.performance = [];
+      if (!ownPerformance) s.performance = [];
       return s;
     });
   delete snapshot.audit;

@@ -3,9 +3,11 @@ import {
   executionLabels,
   type Competitor,
   type Profile,
+  type ScoringRules,
   type Submission,
 } from "./model";
 import { canManage } from "./access";
+import { eventScore, total } from "./scoring";
 
 export function ownSubmissions(profile: Profile, submissions: Submission[]) {
   return submissions.filter((s) => s.user_id === profile.id);
@@ -15,12 +17,42 @@ export function isPerformanceSubmission(submission: Submission) {
   return submission.scoring_type === "performance";
 }
 
-// This helper only controls whether an authenticated judge's own performance
-// values are retained in the private offline cache. Display/API access still
-// requires Admin unlock plus the in-memory Show Points switch.
+// Performance judges may see only their own live Performance score. Score
+// Details and exports keep their separate Admin/Show Points masking rules.
 export function canViewOwnPerformancePoints(profile: Profile, submission: Submission) {
-  return ["performance_judge", "organizer", "server_admin", "judge"].includes(profile.role) &&
+  return profile.role === "performance_judge" &&
     submission.user_id === profile.id && isPerformanceSubmission(submission);
+}
+
+/**
+ * Shape a submission for the authenticated state response. A Performance Judge
+ * may see only their own six category values and total; all other score values
+ * still require the Admin unlock and Show Points session flag.
+ */
+export function stateSubmissionForProfile(
+  profile: Profile,
+  submission: Submission,
+  revealPoints: boolean,
+  rules: ScoringRules,
+): Submission {
+  if (revealPoints) {
+    return {
+      ...submission,
+      total: total(submission, rules),
+      events: submission.events.map((event) => ({
+        ...event,
+        value: eventScore(event, rules),
+      })),
+    };
+  }
+
+  const ownPerformance = canViewOwnPerformancePoints(profile, submission);
+  return {
+    ...submission,
+    performance: ownPerformance ? submission.performance : [],
+    events: submission.events.map(({ value: _value, ...event }) => event),
+    total: ownPerformance ? total(submission, rules) : undefined,
+  };
 }
 
 export function detailSubmissions(profile: Profile, submissions: Submission[]) {
@@ -38,7 +70,7 @@ export function detailExportRows(
 ) {
   return detailSubmissions(profile, submissions).map((s) => ({
     Competitor: competitors.find((c) => c.id === s.competitor_id)?.name,
-    Judge: s.user_id === profile.id ? profile.name : profiles.find((candidate) => candidate.id === s.user_id)?.name ?? s.judge_name_snapshot ?? "Deleted Judge",
+    Judge: `Judge ${s.slot}`,
     Scoring: s.scoring_type ?? "Unknown",
     Status: s.finished ? "Submitted" : "Draft",
     DQ: s.dq,

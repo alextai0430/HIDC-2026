@@ -1,10 +1,11 @@
 import { identity, failure } from "@/lib/server";
-import { eventScore, rankGlobal, total } from "@/lib/scoring";
+import { rankGlobal, total } from "@/lib/scoring";
 import { Submission } from "@/lib/model";
 import { canManage } from "@/lib/access";
 import { sanitizeAuditRows } from "@/lib/audit";
 import { requestHasPointAccess } from "@/lib/admin-unlock";
 import { loadScoringConfiguration } from "@/lib/scoring-config";
+import { stateSubmissionForProfile } from "@/lib/scoped";
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   try {
@@ -26,16 +27,14 @@ export async function GET(req: Request) {
         ? { ...submission, user_id: submission.historical_user_id ?? "deleted-judge" }
         : submission,
     );
-    const submissions = revealPoints
-      ? databaseSubmissions
-      : databaseSubmissions.map((submission) => {
-          return {
-            ...submission,
-            performance: [],
-            events: submission.events.map(({ value: _value, ...event }) => event),
-            total: undefined,
-          };
-        });
+    const submissions = databaseSubmissions.map((submission) =>
+      stateSubmissionForProfile(
+        profile,
+        submission,
+        revealPoints,
+        scoringConfiguration.rules,
+      ),
+    );
     const own = submissions.filter(
       (s) =>
         s.user_id === profile.id &&
@@ -109,16 +108,7 @@ export async function GET(req: Request) {
       pointAccess: revealPoints,
       scoringConfigRevision: scoringConfiguration.revision,
       personal,
-      submissions: submissions.map((s) => {
-        if (!revealPoints) {
-          return s;
-        }
-        return {
-          ...s,
-          total: total(s, scoringConfiguration.rules),
-          events: s.events.map((e) => ({ ...e, value: eventScore(e, scoringConfiguration.rules) })),
-        };
-      }),
+      submissions,
       assignments,
       scoringWindow,
     };

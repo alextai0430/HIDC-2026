@@ -649,6 +649,7 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await db.exec(migration("cascade_unlock_attempts_on_profile_delete.sql"));
   await db.exec(migration("track_competitor_score_operations_and_delete_division.sql"));
   await db.exec(migration("_patch_performance_scores_by_category.sql"));
+  await db.exec(migration("20261001041641_division_centered_event_management.sql"));
   assert.equal((await db.query<{ count: number }>("select count(*)::int as count from operations where competitor_id=$1", [comp])).rows[0].count > 0, true, "legacy score receipts are backfilled from unambiguous same-transaction audit records");
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('authenticated','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);
@@ -719,6 +720,42 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   const assignmentsTwo = makeAssignments([technicalOne], [performanceOne]);
   const assignmentsFive = makeAssignments(technicalGroup.slice(0, 3), [technicalTwo, performanceOne]);
   const assignmentsTen = makeAssignments(technicalGroup, [performanceOne, performanceTwo]);
+  const createDivision = (name: string, roster: unknown[]) =>
+    db.query("select create_division_with_roster($1,$2,$3)", [admin, name, JSON.stringify(roster)]);
+  await assert.rejects(createDivision("Audit Invalid Small", assignments.slice(0, 1)), /between two and ten judges/);
+  await assert.rejects(createDivision("Audit Invalid Large", assignmentsTen.concat(assignmentsTwo)), /between two and ten judges/);
+  await assert.rejects(createDivision("Audit Invalid Duplicate", [
+    { slot: 1, user_id: technicalOne, scoring_type: "technical" },
+    { slot: 1, user_id: performanceOne, scoring_type: "performance" },
+  ]), /different judge and judge number/);
+  await assert.rejects(createDivision("Audit Invalid Technical Only", [
+    { slot: 1, user_id: technicalOne, scoring_type: "technical" },
+    { slot: 2, user_id: technicalTwo, scoring_type: "technical" },
+  ]), /at least one Technical Judge and one Performance Judge/);
+  await assert.rejects(createDivision("Audit Invalid Performance Only", [
+    { slot: 1, user_id: performanceOne, scoring_type: "performance" },
+    { slot: 2, user_id: performanceTwo, scoring_type: "performance" },
+  ]), /at least one Technical Judge and one Performance Judge/);
+  await assert.rejects(createDivision("Audit Invalid Role", [
+    { slot: 1, user_id: technicalOne, scoring_type: "performance" },
+    { slot: 2, user_id: performanceOne, scoring_type: "technical" },
+  ]), /role matches the scoring group/);
+  await createDivision("Audit Atomic Division", assignmentsFive);
+  await assert.rejects(createDivision("audit atomic division", assignmentsFive), /already exists/);
+  assert.equal((await db.query<{ count: number }>("select count(*)::int as count from division_judges where division='Audit Atomic Division'", [])).rows[0].count, 5);
+  const atomicFirst = crypto.randomUUID();
+  const atomicSecond = crypto.randomUUID();
+  await db.query("select manage_competitor($1,'save',$2,false)", [admin, JSON.stringify({ id: atomicFirst, name: "Atomic First", division: "Audit Atomic Division", position: 1, status: "upcoming", dq: false, archived: false })]);
+  await db.query("select manage_competitor($1,'save',$2,false)", [admin, JSON.stringify({ id: atomicSecond, name: "Atomic Second", division: "Audit Atomic Division", position: 2, status: "upcoming", dq: false, archived: false })]);
+  await db.query("select manage_competitor($1,'save',$2,false)", [admin, JSON.stringify({ id: atomicSecond, name: "Atomic Second", division: "Audit Atomic Division", position: 1, status: "upcoming", dq: false, archived: false })]);
+  assert.deepEqual((await db.query<{ id: string; position: number }>("select id,position from competitors where division='Audit Atomic Division' order by position", [])).rows, [
+    { id: atomicSecond, position: 1 }, { id: atomicFirst, position: 2 },
+  ], "manual ordering is independently scoped to the selected division");
+  await assert.rejects(db.query("select manage_judge_assignments($1,$2,$3)", [admin, "Audit Atomic Division", JSON.stringify(assignmentsTwo)]), /roster is locked/);
+  await assert.rejects(db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: atomicFirst })]), /division order/);
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: atomicSecond })]);
+  await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: atomicFirst })]);
+  assert.equal((await db.query<{ status: string }>("select status from competitors where id=$1", [atomicFirst])).rows[0].status, "active", "the next manually activated competitor is within its own division order");
   const selectedProfiles = await db.query<{ id: string; role: string; active: boolean; archived: boolean }>(
     "select id,role,active,archived from profiles where id=any($1::uuid[])",
     [[...technicalGroup, technicalTwo, performanceOne, performanceTwo]],
@@ -743,6 +780,11 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
       throw new Error(`${division} assignment setup failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  await assert.rejects(
+    db.query("select manage_competitor($1,'save',$2,false)", [admin, JSON.stringify({ name: "Blocked Before Roster", division: "Audit Invalid", position: 1, status: "upcoming", dq: false, archived: false })]),
+    /Finalize a valid 2–10 judge division roster/,
+    "competitors cannot be added before their division roster is finalized",
+  );
 
   const twoCompetitor = crypto.randomUUID();
   const fiveCompetitor = crypto.randomUUID();
@@ -844,6 +886,7 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
 
   const activeSignalBefore = (await db.query<{ changed_at: string }>("select changed_at from live_signal where id=true")).rows[0].changed_at;
   await db.query("select manage_competitor($1,'activate',$2,false)", [admin, JSON.stringify({ id: fiveCompetitor })]);
+  assert.equal(await issueWindow(fiveCompetitor, unused), null, "activation issues scoring windows only to judges in that competitor's division roster");
   const fiveTechnicalWindow = await issueWindow(fiveCompetitor, technicalThree);
   assert.equal((await db.query<{ count: number }>("select count(*)::int as count from submissions where competitor_id=$1", [fiveCompetitor])).rows[0].count, 5);
   const delayedEvent = { id: crypto.randomUUID(), trick: "R 1D", level: 1, features: [], execution: "E0", at: fiveTechnicalWindow.opened_at };

@@ -24,6 +24,7 @@ import {
   detailSubmissions,
   ownSubmissions,
   personalScoreExportRows,
+  stateSubmissionForProfile,
 } from "../lib/scoped";
 
 const alex: Profile = {
@@ -270,23 +271,22 @@ test("management, review, and audit reject judges 2–5 before database access",
   }
 });
 
-test("division creation reports an existing division clearly instead of surfacing a database key error", async () => {
-  let inserts = 0;
-  const builder: any = {
-    select: () => builder,
-    eq: () => builder,
-    maybeSingle: async () => ({ data: { name: "Exhibition" }, error: null }),
-    insert: async () => {
-      inserts += 1;
-      return { error: { code: "23505", message: "duplicate key value violates unique constraint divisions_pkey" } };
-    },
-  };
-  const response = await route("manage", alex, { from: () => builder }).POST(
-    request({ action: "division", data: { name: "Exhibition" } }),
+test("division creation reports duplicate names clearly through the atomic roster RPC", async () => {
+  const calls: unknown[] = [];
+  const client = { rpc: async (name: string, args: unknown) => {
+    calls.push([name, args]);
+    return { error: { code: "P0001", message: "That division already exists" } };
+  } };
+  const response = await route("manage", alex, client).POST(
+    request({ action: "division", data: { name: "Exhibition", assignments: [
+      { slot: 1, user_id: crypto.randomUUID(), scoring_type: "technical" },
+      { slot: 2, user_id: crypto.randomUUID(), scoring_type: "performance" },
+    ] } }),
   );
   assert.equal(response.status, 400);
-  assert.match((await response.json()).error, /already exists.*Division list/i);
-  assert.equal(inserts, 0, "duplicate preflight must prevent an insert");
+  assert.match((await response.json()).error, /already exists/i);
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0] as any[])[0], "create_division_with_roster");
 });
 
 test("sync leaves division authorization to the server-side assignment check", async () => {
@@ -505,7 +505,10 @@ test("both administrators can activate, lock, review and create divisions", asyn
     assert.equal(
       (
         await route("manage", p, client).POST(
-          request({ action: "division", data: { name: "Test Division" } }),
+          request({ action: "division", data: { name: "Test Division", assignments: [
+            { slot: 1, user_id: crypto.randomUUID(), scoring_type: "technical" },
+            { slot: 2, user_id: crypto.randomUUID(), scoring_type: "performance" },
+          ] } }),
         )
       ).status,
       200,
@@ -739,9 +742,16 @@ test("state endpoint masks score data until unlock and only returns own judge po
     const hiddenBody = await response.json();
     assert.equal(hiddenBody.pointAccess, false);
     for (const submission of hiddenBody.submissions) {
-      assert.equal(submission.total, undefined);
-      assert.deepEqual(submission.performance, []);
-      assert.equal(submission.events[0].value, undefined);
+      const ownPerformance = p.role === "performance_judge" &&
+        submission.user_id === p.id && submission.scoring_type === "performance";
+      if (ownPerformance) {
+        assert.equal(submission.total, 30, "Performance judges receive their own total without Admin access");
+        assert.deepEqual(submission.performance, [5, 5, 5, 5, 5, 5], "Performance judges receive their six own categories");
+      } else {
+        assert.equal(submission.total, undefined);
+        assert.deepEqual(submission.performance, []);
+      }
+      assert.equal(submission.events[0].value, undefined, "technical event points remain masked");
     }
     assert.ok(hiddenBody.personal.every((entry: any) => entry.total === undefined));
     if (access.isAdministrator(p)) {
@@ -781,8 +791,10 @@ test("state endpoint masks score data until unlock and only returns own judge po
     const stillHidden = await unlockedButHidden.json();
     assert.equal(stillHidden.pointAccess, false, "Admin unlock alone must not reveal points");
     for (const saved of stillHidden.submissions) {
-      assert.equal(saved.total, undefined);
-      assert.deepEqual(saved.performance, []);
+      const ownPerformance = p.role === "performance_judge" &&
+        saved.user_id === p.id && saved.scoring_type === "performance";
+      assert.equal(saved.total, ownPerformance ? 30 : undefined);
+      assert.deepEqual(saved.performance, ownPerformance ? [5, 5, 5, 5, 5, 5] : []);
       assert.equal(saved.events[0].value, undefined);
     }
     const unlocked = await route("state", p, client).GET(
@@ -1108,6 +1120,32 @@ test("performance points stay masked until Admin unlock and Show Points are both
   const revealed = personalScoreExportRows(judge, visible, [competitor], true);
   assert.equal(revealed[0].Total, 15);
   assert.equal((revealed[0] as Record<string, unknown>).Control, 5);
+  assert.equal(detailExportRows(judge, visible, [competitor])[0].Judge, `Judge ${judge.slot}`);
+});
+
+test("state response exposes only a Performance Judge's own Performance numbers while locked", () => {
+  const judge = judges[2];
+  const own: Submission = {
+    id: "own-performance", competitor_id: "c1", user_id: judge.id, slot: 4,
+    scoring_type: "performance", events: [], performance: [1, 2, 3, 4, 5, 5],
+    total: 0, finished: false, dq: false, version: 1, updated_at: "now",
+  };
+  const other: Submission = { ...own, id: "other-performance", user_id: judges[3].id, performance: [5, 5, 5, 5, 5, 5] };
+  const technical: Submission = {
+    ...own, id: "technical", user_id: judges[0].id, scoring_type: "technical",
+    events: [{ id: "event", trick: "T 1D", level: 1, features: [], at: "now", value: 99 }],
+    performance: [], total: 99,
+  };
+  const ownState = stateSubmissionForProfile(judge, own, false, DEFAULT_SCORING_RULES);
+  assert.deepEqual(ownState.performance, own.performance);
+  assert.equal(ownState.total, 20);
+  const otherState = stateSubmissionForProfile(judge, other, false, DEFAULT_SCORING_RULES);
+  assert.deepEqual(otherState.performance, []);
+  assert.equal(otherState.total, undefined);
+  const technicalState = stateSubmissionForProfile(judge, technical, false, DEFAULT_SCORING_RULES);
+  assert.deepEqual(technicalState.performance, []);
+  assert.equal(technicalState.total, undefined);
+  assert.equal(technicalState.events[0].value, undefined);
 });
 
 test("organizers create each supported role as a new account without numbered slots", async () => {
@@ -1520,7 +1558,7 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
   assert.deepEqual(await storage.readLocal(alex.id), cached);
 });
 
-test("offline storage masks saved points until Admin unlock and Show Points are both active", () => {
+test("offline storage retains only a Performance Judge's own Performance values", () => {
   const judge: Profile = { ...judges[2], slot: 2 };
   const ownPerformance: Submission = {
     id: crypto.randomUUID(), competitor_id: crypto.randomUUID(), user_id: judge.id,
@@ -1534,7 +1572,7 @@ test("offline storage masks saved points until Admin unlock and Show Points are 
     },
     queue: [],
   });
-  assert.deepEqual(cached.snapshot.submissions[0].performance, []);
-  assert.equal(cached.snapshot.submissions[0].total, undefined);
+  assert.deepEqual(cached.snapshot.submissions[0].performance, ownPerformance.performance);
+  assert.equal(cached.snapshot.submissions[0].total, 15);
   assert.equal(cached.snapshot.personal?.[0].total, undefined);
 });

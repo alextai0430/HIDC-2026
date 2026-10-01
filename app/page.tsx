@@ -66,6 +66,12 @@ import {
   ownSubmissions,
   personalScoreExportRows,
 } from "@/lib/scoped";
+import {
+  competitorProgress,
+  divisionCompetitors,
+  divisionJudgeRoster,
+  divisionRosterIsValid,
+} from "@/lib/division-management";
 
 const defaultKeys: Record<string, string> = {
   submit: "Enter",
@@ -198,6 +204,14 @@ const hotkeyActionLabel = (action: string) => {
 };
 type ScoringType = "technical" | "performance";
 type JudgeAssignment = { division: string; slot: number; user_id: string; scoring_type?: ScoringType };
+type DivisionRosterDraftRow = { slot: number; user_id: string; scoring_type: ScoringType };
+function defaultDivisionRosterDraft(): DivisionRosterDraftRow[] {
+  return Array.from({ length: 5 }, (_, index) => ({
+    slot: index + 1,
+    user_id: "",
+    scoring_type: index < 3 ? "technical" : "performance",
+  }));
+}
 const profileScoringType = (profile?: Profile | null): ScoringType => profile?.role === "performance_judge" ? "performance" : "technical";
 const assignmentScoringType = (assignment?: JudgeAssignment, profile?: Profile): ScoringType =>
   assignment?.scoring_type ?? profileScoringType(profile);
@@ -310,7 +324,9 @@ export default function Page() {
   const [appearanceSyncError, setAppearanceSyncError] = useState("");
   const appearanceSyncBusy = useRef(false);
   const [newDivision, setNewDivision] = useState("");
-  const [divisionFormOpen, setDivisionFormOpen] = useState(false);
+  const [divisionFormTarget, setDivisionFormTarget] = useState<{ creating: boolean; division: string } | null>(null);
+  const [divisionRosterDraft, setDivisionRosterDraft] = useState<DivisionRosterDraftRow[]>([]);
+  const [divisionFormError, setDivisionFormError] = useState("");
   const [divisionDeleteTarget, setDivisionDeleteTarget] = useState("");
   const [divisionDeleteConfirmation, setDivisionDeleteConfirmation] = useState("");
   const [submittingCompetitors, setSubmittingCompetitors] = useState<Set<string>>(() => new Set());
@@ -341,8 +357,6 @@ export default function Page() {
     [confirmAdminTabPassword, setConfirmAdminTabPassword] = useState(""),
     [adminTabPasswordMessage, setAdminTabPasswordMessage] = useState(""),
     [filter, setFilter] = useState("All divisions"),
-    [assignmentDivision, setAssignmentDivision] = useState(divisions[0]),
-    [assignmentDraft, setAssignmentDraft] = useState<Record<string, { user_id: string; scoring_type: ScoringType }> | null>(null),
     [competitorEdit, setCompetitorEdit] = useState<Partial<Competitor> | null>(
       null,
     ),
@@ -359,6 +373,13 @@ export default function Page() {
     adminUnlocked && showPoints && !!adminUnlockToken && state?.pointAccess === true;
   const canViewSubmissionPoints = (submission?: Submission) =>
     !!submission && canViewPoints;
+  const canViewLivePerformancePoints = (submission?: Submission) =>
+    !!submission && (
+      canViewPoints ||
+      (profile?.role === "performance_judge" &&
+        submission.scoring_type === "performance" &&
+        submission.user_id === profile.id)
+    );
   const canViewPersonalPoints = (competitorId: string) =>
     canViewPoints && !!state?.submissions.some((submission) => submission.competitor_id === competitorId);
   const active = state?.competitors.find(
@@ -426,17 +447,6 @@ export default function Page() {
     ...(state ? state.divisions ?? [] : divisions),
     ...(state?.competitors.map((c) => c.division) ?? []),
   ]));
-  const allDivisionKey = allDivisions.join("\u0000");
-  useEffect(() => {
-    const options = allDivisionKey ? allDivisionKey.split("\u0000") : [];
-    if (!options.length) {
-      if (assignmentDivision) setAssignmentDivision("");
-      setAssignmentDraft(null);
-    } else if (!options.includes(assignmentDivision)) {
-      setAssignmentDivision(options[0]);
-      setAssignmentDraft(null);
-    }
-  }, [allDivisionKey, assignmentDivision]);
   const syncStatus = demo
     ? "Score saved locally · demo"
     : syncError && workspace?.queue.length
@@ -446,77 +456,37 @@ export default function Page() {
         : workspace?.queue.length
           ? "Score saved locally"
           : "Score synced";
-  const divisionAssignments = (state?.assignments ?? []).filter(
-    (a) => a.division === assignmentDivision,
-  );
-  const assignmentLocked = (state?.competitors ?? []).some((competitor) => competitor.division === assignmentDivision);
   const divisionProfiles = (state?.profiles ?? []).filter(
     (p) => p.active && !p.archived,
   );
-  const currentAssignmentDraft: Record<string, { user_id: string; scoring_type: ScoringType }> = Object.fromEntries(
-    divisionAssignments.map((a) => [String(a.slot), {
-      user_id: a.user_id,
-      scoring_type: assignmentScoringType(a, state?.profiles?.find((judge) => judge.id === a.user_id)),
-    }]),
-  );
-  const editableAssignments = assignmentDraft ?? currentAssignmentDraft;
-  const editableAssignmentRows = Object.entries(editableAssignments)
-    .map(([slot, row]) => ({ slot: Number(slot), ...row }))
-    .sort((a, b) => a.slot - b.slot);
+  const normalizedDivisionAssignments = (state?.assignments ?? []).map((assignment) => ({
+    ...assignment,
+    scoring_type: assignmentScoringType(
+      assignment,
+      state?.profiles?.find((candidate) => candidate.id === assignment.user_id),
+    ),
+  }));
+  const orderedDivisionRosterDraft = [...divisionRosterDraft].sort((a, b) => a.slot - b.slot);
+  const divisionRosterDraftValid = orderedDivisionRosterDraft.length >= 2 &&
+    orderedDivisionRosterDraft.length <= 10 &&
+    orderedDivisionRosterDraft.every((row) => !!row.user_id) &&
+    new Set(orderedDivisionRosterDraft.map((row) => row.user_id)).size === orderedDivisionRosterDraft.length &&
+    divisionRosterIsValid(orderedDivisionRosterDraft) &&
+    orderedDivisionRosterDraft.every((row) => {
+      const account = divisionProfiles.find((candidate) => candidate.id === row.user_id);
+      return !!account && profileCanScoreType(account, row.scoring_type);
+    });
   const competitorDraftRoster = (state?.assignments ?? []).filter(
     (assignment) => assignment.division === competitorEdit?.division,
   );
-  const competitorDraftRosterValid = competitorDraftRoster.length >= 2 &&
-    competitorDraftRoster.length <= 10 &&
-    competitorDraftRoster.some((assignment) => assignment.scoring_type === "technical") &&
-    competitorDraftRoster.some((assignment) => assignment.scoring_type === "performance");
-  const nextUpcoming = [...(state?.competitors ?? [])]
-    .filter((c) => c.status === "upcoming" && !c.archived)
-    .sort((a, b) => a.position - b.position)[0];
+  const competitorDraftRosterValid = divisionRosterIsValid(
+    competitorDraftRoster
+      .map((assignment) => ({ slot: assignment.slot, scoring_type: assignmentScoringType(assignment, state?.profiles?.find((p) => p.id === assignment.user_id)) }))
+      .sort((a, b) => a.slot - b.slot),
+  );
   const oldestQueuedConfigRevision = workspace?.queue.length
     ? Math.min(...workspace.queue.map((op) => op.scoring_config_revision ?? state?.scoringConfigRevision ?? 1))
     : undefined;
-  const progressRows = [...(state?.competitors ?? [])]
-    .filter((c) => !c.archived)
-    .sort((a, b) => a.position - b.position)
-    .map((competitor) => {
-      const official = state?.judgeRoster?.filter((judge) => judge.competitor_id === competitor.id && judge.expected);
-      const judges = official
-        ? official.map((judge) => ({ division: competitor.division, slot: judge.roster_order, user_id: judge.user_id, scoring_type: judge.scoring_type, display_name: judge.display_name }))
-        : (state?.assignments ?? []).filter((assignment) => assignment.division === competitor.division);
-      judges.sort((a, b) => a.slot - b.slot);
-      const entries = judges.map((judge) => {
-        const judgeProfile = state?.profiles?.find((p) => p.id === judge.user_id);
-        const scoringType = assignmentScoringType(judge, judgeProfile);
-        const submission = state?.submissions.find(
-          (s) => s.competitor_id === competitor.id && (s.user_id === judge.user_id || s.historical_user_id === judge.user_id) &&
-            s.scoring_type === scoringType,
-        );
-        return {
-          ...judge,
-          name: judgeProfile?.name ?? ("display_name" in judge && typeof judge.display_name === "string" ? judge.display_name : "Former judge"),
-          scoring_type: scoringType,
-          status: submission?.finished
-            ? "Submitted"
-            : submission && submission.version > 0
-              ? "In progress"
-              : "Not started",
-        };
-      });
-      const complete = entries.length >= 2 && entries.some((entry) => entry.scoring_type === "technical") && entries.some((entry) => entry.scoring_type === "performance") && entries.every((entry) => entry.status === "Submitted");
-      const started = entries.some((entry) => entry.status !== "Not started");
-      return {
-        competitor,
-        entries,
-        complete,
-        started,
-        stateLabel: complete ? "Complete" : competitor.status === "active" ? "Active · in progress" : started ? "Started · incomplete" : "Not started · locked",
-      };
-    });
-  const validProgressAssignments = (entries: { scoring_type: ScoringType }[]) =>
-    entries.length >= 2 && entries.length <= 10 &&
-    entries.some((entry) => entry.scoring_type === "technical") &&
-    entries.some((entry) => entry.scoring_type === "performance");
   const accountHasScoreHistory = (accountId: string) =>
     (state?.submissions ?? []).some((submission) => submission.user_id === accountId && (
       submission.version > 0 || submission.finished || submission.dq || submission.events.length > 0 || submission.performance.some((value) => value !== 0)
@@ -1573,17 +1543,33 @@ export default function Page() {
             "locked";
         } else if (action === "delete") {
           const target = data as { id: string };
+          const removed = next.snapshot.competitors.find((competitor) => competitor.id === target.id);
           next.snapshot.competitors = next.snapshot.competitors.filter((competitor) => competitor.id !== target.id);
           next.snapshot.submissions = next.snapshot.submissions.filter((submission) => submission.competitor_id !== target.id);
-          next.snapshot.competitors
+          if (removed) next.snapshot.competitors
+            .filter((competitor) => competitor.division === removed.division)
             .sort((a, b) => a.position - b.position)
             .forEach((competitor, index) => { competitor.position = index + 1; });
         } else if (action === "save") {
           const index = next.snapshot.competitors.findIndex(
             (c) => c.id === d.id,
           );
-          if (index < 0) next.snapshot.competitors.push({ ...d, id: uid() });
-          else next.snapshot.competitors[index] = d;
+          if (index < 0) {
+            next.snapshot.competitors
+              .filter((competitor) => competitor.division === d.division && competitor.position >= d.position)
+              .forEach((competitor) => { competitor.position += 1; });
+            next.snapshot.competitors.push({ ...d, id: uid() });
+          } else {
+            const prior = next.snapshot.competitors[index];
+            if (prior.division === d.division && d.position < prior.position) {
+              next.snapshot.competitors.filter((competitor) => competitor.id !== d.id && competitor.division === d.division && competitor.position >= d.position && competitor.position < prior.position)
+                .forEach((competitor) => { competitor.position += 1; });
+            } else if (prior.division === d.division && d.position > prior.position) {
+              next.snapshot.competitors.filter((competitor) => competitor.id !== d.id && competitor.division === d.division && competitor.position > prior.position && competitor.position <= d.position)
+                .forEach((competitor) => { competitor.position -= 1; });
+            }
+            next.snapshot.competitors[index] = d;
+          }
         } else if (action === "assignments") {
           const assignment = data as { division: string; assignments: { slot: number; user_id: string; scoring_type: ScoringType }[] };
           next.snapshot.assignments = [
@@ -1605,7 +1591,7 @@ export default function Page() {
           const impact = (result as { divisionOutcome?: { competitors?: number; submitted_scores?: number } })?.divisionOutcome;
           setNotice(`Division deleted. Removed ${impact?.competitors ?? 0} competitors and ${impact?.submitted_scores ?? 0} submitted scores.`);
         } else if (action === "reactivate_user") setNotice("Legacy archived account reactivated.");
-        else setNotice(action === "create_user" ? "Account created." : action === "update_user" ? "Account updated." : action === "assignments" ? "Division assignments saved." : action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
+        else setNotice(action === "create_user" ? "Account created." : action === "update_user" ? "Account updated." : action === "division" || action === "assignments" ? "Division judge roster finalized." : action === "delete" ? "Competitor and saved scores deleted" : "Changes saved");
         try {
           await refresh();
         } catch (refreshError) {
@@ -1613,7 +1599,7 @@ export default function Page() {
             setNotice(action === "create_user"
               ? "Account created. The account list could not refresh yet."
               : "Account updated. The account list could not refresh yet.");
-          } else if (action === "remove_division") {
+        } else if (action === "remove_division") {
             setNotice("Division deleted. The server view could not refresh yet; retry sync to update progress and rankings.");
           } else {
             throw refreshError;
@@ -1630,28 +1616,82 @@ export default function Page() {
       if (action === "remove_division") {
         setDivisionDeleteTarget("");
         setDivisionDeleteConfirmation("");
-        setAssignmentDraft(null);
       }
       return true;
     } catch (e) {
       if (action === "create_user" || action === "update_user")
         setAccountFormError((e as Error).message);
+      else if (action === "division" || action === "assignments")
+        setDivisionFormError((e as Error).message);
       else setSyncError((e as Error).message);
       return false;
     }
   }
   async function addDivision(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const name = newDivision.trim();
-    if (!name) return;
-    if (allDivisions.some((division) => division.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
-      setSyncError("That division already exists. Select it from the Division list instead.");
+    if (!divisionFormTarget) return;
+    setDivisionFormError("");
+    const name = divisionFormTarget.creating ? newDivision.trim() : divisionFormTarget.division;
+    if (!name) {
+      setDivisionFormError("Enter a division name.");
       return;
     }
-    if (await manage("division", { name })) {
-      setNewDivision("");
-      setDivisionFormOpen(false);
+    if (divisionFormTarget.creating && allDivisions.some((division) => division.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setDivisionFormError("That division already exists. Choose another name.");
+      return;
     }
+    const rows = [...divisionRosterDraft].sort((a, b) => a.slot - b.slot);
+    if (rows.length < 2 || rows.length > 10 || rows.some((row) => !row.user_id) ||
+      new Set(rows.map((row) => row.user_id)).size !== rows.length ||
+      !divisionRosterIsValid(rows) ||
+      rows.some((row) => {
+        const account = divisionProfiles.find((candidate) => candidate.id === row.user_id);
+        return !account || !profileCanScoreType(account, row.scoring_type);
+      })) {
+      setDivisionFormError("Assign 2–10 unique judges with consecutive numbers starting at 1, including at least one Technical and one Performance Judge. Account roles must match their scoring group.");
+      return;
+    }
+    const assignments = rows.map(({ slot, user_id, scoring_type }) => ({ slot, user_id, scoring_type }));
+    const saved = await manage(
+      divisionFormTarget.creating ? "division" : "assignments",
+      divisionFormTarget.creating ? { name, assignments } : { division: name, assignments },
+    );
+    if (saved) {
+      setNewDivision("");
+      setDivisionFormTarget(null);
+      setDivisionRosterDraft([]);
+      setDivisionFormError("");
+    }
+  }
+  function openCreateDivision() {
+    setNewDivision("");
+    setDivisionRosterDraft(defaultDivisionRosterDraft());
+    setDivisionFormError("");
+    setDivisionFormTarget({ creating: true, division: "" });
+  }
+  function openFinalizeDivisionRoster(name: string) {
+    const existing = (state?.assignments ?? [])
+      .filter((assignment) => assignment.division === name)
+      .map((assignment) => ({
+        slot: assignment.slot,
+        user_id: assignment.user_id,
+        scoring_type: assignmentScoringType(assignment, state?.profiles?.find((judge) => judge.id === assignment.user_id)),
+      }))
+      .sort((a, b) => a.slot - b.slot);
+    const draft = existing.length ? [...existing] : [];
+    while (draft.length < 5) {
+      const nextSlot = draft.length + 1;
+      const technicalCount = draft.filter((row) => row.scoring_type === "technical").length;
+      const performanceCount = draft.filter((row) => row.scoring_type === "performance").length;
+      draft.push({
+        slot: nextSlot,
+        user_id: "",
+        scoring_type: technicalCount === 0 ? "technical" : performanceCount === 0 ? "performance" : technicalCount <= performanceCount ? "technical" : "performance",
+      });
+    }
+    setDivisionRosterDraft(draft);
+    setDivisionFormError("");
+    setDivisionFormTarget({ creating: false, division: name });
   }
   async function switchDemo(value: string) {
     const role = value as Profile["role"];
@@ -2464,7 +2504,7 @@ export default function Page() {
                           <h3>{category}</h3>
                         </div>
                         <strong>
-                          {canViewSubmissionPoints(displayed)
+                          {canViewLivePerformancePoints(displayed)
                             ? (displayed?.performance[i] ?? 0).toFixed(1)
                             : "***"}
                         </strong>
@@ -2500,7 +2540,7 @@ export default function Page() {
                 <aside className="panel performance-summary">
                   <h2>Performance</h2>
                   <div className="big-total">
-                    {canViewSubmissionPoints(displayed)
+                    {canViewLivePerformancePoints(displayed)
                       ? (displayed?.performance.reduce((a, b) => a + b, 0) ?? 0).toFixed(1)
                       : "***"}
                     <span>/ 30</span>
@@ -2508,7 +2548,7 @@ export default function Page() {
                   {categories.map((c, i) => (
                     <div className="summary-row" key={c}>
                       <span>{c}</span>
-                      <b>{canViewSubmissionPoints(displayed) ? (displayed?.performance[i] ?? 0).toFixed(1) : "***"}</b>
+                      <b>{canViewLivePerformancePoints(displayed) ? (displayed?.performance[i] ?? 0).toFixed(1) : "***"}</b>
                     </div>
                   ))}
                 </aside>
@@ -3011,311 +3051,160 @@ export default function Page() {
                 >
                   <Lock size={15} /> End Routine
                 </button>
-                <button
-                  className="primary"
-                  disabled={
-                    !nextUpcoming
-                  }
-                  onClick={() => {
-                    const next = nextUpcoming;
-                    if (next)
-                      setModal({
-                        title: `Activate ${next.name}?`,
-                        body: "The current routine will be locked and all connected judges will see this competitor.",
-                        action: () => void manage("activate", { id: next.id }),
-                      });
-                  }}
-                >
-                  Start Next <ArrowRight size={16} />
-                </button>
               </div>
             </section>
-            <section className="panel records division-assignment-panel">
-              <div className="panel-heading">
-                <h3>Division Judge Assignments</h3>
-                <div className="division-assignment-header-actions">
-                  {allDivisions.length ? <label>
-                    Division
-                    <select
-                      aria-label="Division judge assignments"
-                      value={assignmentDivision}
-                      onChange={(event) => {
-                        const nextDivision = event.target.value;
-                        setAssignmentDivision(nextDivision);
-                        setAssignmentDraft(null);
-                      }}
-                    >
-                      {allDivisions.map((division) => <option key={division}>{division}</option>)}
-                    </select>
-                  </label> : <span className="muted">No divisions</span>}
-                  <button
-                    type="button"
-                    disabled={demo}
-                    onClick={() => {
-                      setNewDivision("");
-                      setDivisionFormOpen(true);
-                    }}
-                  >
-                  <Plus size={14} /> Add Division
-                  </button>
-                  <button
-                    type="button"
-                    className="danger-button"
-                    disabled={demo || !assignmentDivision}
-                    onClick={() => {
-                      setDivisionDeleteTarget(assignmentDivision);
-                      setDivisionDeleteConfirmation("");
-                    }}
-                  >
-                    <Trash2 size={14} /> Delete Division
-                  </button>
-                </div>
+            <section className="division-management-heading">
+              <div>
+                <h2>Divisions</h2>
+                <p>Each division has an independent competitor order and a finalized numbered judge roster.</p>
               </div>
-              <p>Normally assign 3 Technical Judges and 2 Performance Judges. Each division has its own group; judges may serve in multiple divisions. Organizers count only when explicitly assigned.</p>
-              {assignmentLocked ? <p className="info-note" role="status">This division’s official roster is locked because competitors already exist in it.</p> : null}
-              {divisionFormOpen && (
-                <form className="division-add-form" onSubmit={addDivision}>
-                  <label>
-                    New division name
-                    <input
-                      autoFocus
-                      required
-                      maxLength={80}
-                      value={newDivision}
-                      onChange={(event) => setNewDivision(event.target.value)}
-                    />
-                  </label>
-                  {newDivision.trim() && allDivisions.some((division) => division.trim().toLocaleLowerCase() === newDivision.trim().toLocaleLowerCase()) ? (
-                    <span className="division-duplicate-hint" role="status">This division already exists. Select it from the Division list.</span>
-                  ) : null}
-                  <button type="button" onClick={() => setDivisionFormOpen(false)}>Cancel</button>
-                  <button className="primary" disabled={demo || !newDivision.trim() || allDivisions.some((division) => division.trim().toLocaleLowerCase() === newDivision.trim().toLocaleLowerCase())}>Save Division</button>
-                </form>
-              )}
-              {assignmentDivision ? <div className="division-assignment-grid">
-                {editableAssignmentRows.map(({ slot, user_id, scoring_type }) => {
-                  const usedElsewhere = new Set(editableAssignmentRows.filter((row) => row.slot !== slot).map((row) => row.user_id));
-                  const updateRow = (change: Partial<{ user_id: string; scoring_type: ScoringType }>) => {
-                    setAssignmentDraft((prior) => ({ ...(prior ?? currentAssignmentDraft), [String(slot)]: { ...editableAssignments[String(slot)], ...change } }));
-                  };
-                  return (
-                    <div className="assignment-judge-row" key={slot}>
-                      <b>{scoring_type === "technical" ? "Technical Judge" : "Performance Judge"}</b>
-                      <label>
-                        Scoring group
-                        <select disabled={assignmentLocked} value={scoring_type} onChange={(event) => {
-                          const nextType = event.target.value as ScoringType;
-                          const assignedProfile = divisionProfiles.find((candidate) => candidate.id === user_id);
-                          updateRow({ scoring_type: nextType, user_id: assignedProfile && profileCanScoreType(assignedProfile, nextType) ? user_id : "" });
-                        }}>
-                          <option value="technical">Technical</option>
-                          <option value="performance">Performance</option>
-                        </select>
-                      </label>
-                      <label>
-                        Judge account
-                        <select disabled={assignmentLocked} value={user_id} onChange={(event) => updateRow({ user_id: event.target.value })}>
-                          <option value="">Select assigned judge</option>
-                          {divisionProfiles.filter((p) => profileCanScoreType(p, scoring_type)).map((p) => (
-                            <option key={p.id} value={p.id} disabled={usedElsewhere.has(p.id)}>
-                              {p.name} · @{p.username}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <button type="button" disabled={assignmentLocked} aria-label="Remove assignment" title="Remove assignment" onClick={() => {
-                        const remaining = editableAssignmentRows.filter((row) => row.slot !== slot);
-                        setAssignmentDraft(Object.fromEntries(remaining.map((row, index) => [String(index + 1), { user_id: row.user_id, scoring_type: row.scoring_type }])));
-                      }}><Trash2 size={14} /> Remove</button>
+              <button type="button" className="primary" disabled={demo} onClick={openCreateDivision}>
+                <Plus size={15} /> Create Division
+              </button>
+            </section>
+            {!allDivisions.length ? <section className="panel empty-state">Create a division and finalize its judge roster before adding competitors.</section> : null}
+            {allDivisions.map((division) => {
+              const competitors = divisionCompetitors(state.competitors, division);
+              const roster = divisionJudgeRoster(
+                division,
+                state.competitors,
+                normalizedDivisionAssignments,
+                state.judgeRoster ?? [],
+                state.profiles ?? [],
+              );
+              const rosterValid = divisionRosterIsValid(roster.map(({ slot, scoring_type }) => ({ slot, scoring_type })));
+              const firstUpcoming = competitors.find((competitor) => competitor.status === "upcoming");
+              return (
+                <section className="panel division-management-panel" key={division}>
+                  <div className="panel-heading division-panel-heading">
+                    <div>
+                      <h3>{division}</h3>
+                      <p>{roster.length} assigned judge{roster.length === 1 ? "" : "s"} · {competitors.length} competitor{competitors.length === 1 ? "" : "s"} · order is within this division</p>
                     </div>
-                  );
-                })}
-                <div className="assignment-editor-actions">
-                  <button type="button" disabled={assignmentLocked || editableAssignmentRows.length >= 10} onClick={() => {
-                    const nextSlot = editableAssignmentRows.length + 1;
-                    const techCount = editableAssignmentRows.filter((row) => row.scoring_type === "technical").length;
-                    const performanceCount = editableAssignmentRows.filter((row) => row.scoring_type === "performance").length;
-                    const scoring_type = techCount === 0 ? "technical" : performanceCount === 0 ? "performance" : techCount <= performanceCount ? "technical" : "performance";
-                    setAssignmentDraft((prior) => ({ ...(prior ?? currentAssignmentDraft), [String(nextSlot)]: { user_id: "", scoring_type } }));
-                  }}><Plus size={14} /> Add Judge</button>
-                  <button
-                    className="primary"
-                    disabled={
-                      assignmentLocked || editableAssignmentRows.length < 2 || editableAssignmentRows.length > 10 ||
-                      editableAssignmentRows.some((row) => !row.user_id) ||
-                      new Set(editableAssignmentRows.map((row) => row.user_id)).size !== editableAssignmentRows.length ||
-                      !editableAssignmentRows.some((row) => row.scoring_type === "technical") ||
-                      !editableAssignmentRows.some((row) => row.scoring_type === "performance")
-                    }
-                    onClick={() => {
-                      const assignments = editableAssignmentRows.map(({ slot, user_id, scoring_type }) => ({ slot, user_id, scoring_type }));
-                      const unchanged = JSON.stringify(assignments) === JSON.stringify(divisionAssignments.map(({ slot, user_id, scoring_type }) => ({ slot, user_id, scoring_type: assignmentScoringType({ division: assignmentDivision, slot, user_id, scoring_type }, state?.profiles?.find((p) => p.id === user_id)) })));
-                      if (unchanged) return;
-                      const divisionCompetitors = new Set(state?.competitors.filter((competitor) => competitor.division === assignmentDivision).map((competitor) => competitor.id));
-                      const scored = (state?.submissions ?? []).filter((submission) => divisionCompetitors.has(submission.competitor_id) && (submission.version > 0 || submission.finished || submission.dq || submission.events.length > 0 || submission.performance.some((value) => value !== 0)));
-                      const saveAssignments = () => void manage("assignments", { division: assignmentDivision, assignments });
-                      if (scored.length) {
-                        const affectedCompetitors = new Set(scored.map((submission) => submission.competitor_id)).size;
-                        setModal({
-                          title: "Change Division Judge Assignments?",
-                          body: `${scored.length} saved score submission${scored.length === 1 ? "" : "s"} across ${affectedCompetitors} competitor${affectedCompetitors === 1 ? "" : "s"} will be evaluated against the new assigned group. Historical scores remain attributed to their original judges, but completion and final rankings may change.`,
-                          action: saveAssignments,
-                          confirmLabel: "Confirm Assignment Change",
-                          danger: true,
-                        });
-                      } else saveAssignments();
-                    }}
-                  >Save Judge Group</button>
-                </div>
-              </div> : <p className="division-empty-state">Add a division to configure its assigned judges.</p>}
-            </section>
-            <section className="panel records progress-overview">
-              <div className="panel-heading">
-                <h3>Competitor Progress</h3>
-                <span className="muted">Green only when all assigned judges submit</span>
-              </div>
-              <div className="progress-table-wrap">
-                <div className="progress-table-header" aria-hidden="true">
-                  <span>Order</span><span>Competitor · Division</span><span>Overall</span><span>Assigned Judges</span>
-                </div>
-                <div className="progress-list">
-                  {progressRows.map(({ competitor, entries, complete, stateLabel }) => {
-                    const status = complete ? "progress-complete" : competitor.status === "active" ? "progress-active" : "progress-locked";
-                    return (
-                      <div className={`progress-row ${status}`} key={competitor.id}>
-                        <span className="progress-order">{String(competitor.position).padStart(2, "0")}</span>
-                        <div className="progress-competitor"><b>{competitor.name}</b><small>{competitor.division}</small></div>
-                        <span className={`progress-status ${status}`}>
-                          {complete ? "✓ Complete" : competitor.status === "active" ? "● Active · in progress" : stateLabel}
-                        </span>
-                        <div className="judge-progress-list">
-                          {validProgressAssignments(entries) ? entries.map((entry) => (
-                            <span
-                              key={entry.user_id}
-                              className={`judge-progress ${entry.status === "Submitted" ? "finished" : entry.status === "In progress" ? "draft" : "not-started"}`}
-                              title={`${entry.scoring_type === "technical" ? "Technical" : "Performance"} · ${entry.name} · ${entry.status}`}
-                            >
-                              <b>{entry.scoring_type === "technical" ? "Technical" : "Performance"} · {entry.name}</b><em>{entry.status}</em>
-                            </span>
-                          )) : <span className="assignment-warning">Assign 2–10 judges across both scoring groups</span>}
-                        </div>
+                    <div className="division-panel-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={demo || !rosterValid}
+                        title={!rosterValid ? "Finalize a valid judge roster first" : undefined}
+                        onClick={() => setCompetitorEdit({
+                          name: "",
+                          division,
+                          position: competitors.length + 1,
+                          status: "upcoming",
+                          dq: false,
+                          archived: false,
+                        })}
+                      ><Plus size={14} /> Add Competitor</button>
+                      <button type="button" className="danger-button" disabled={demo} onClick={() => {
+                        setDivisionDeleteTarget(division);
+                        setDivisionDeleteConfirmation("");
+                      }}><Trash2 size={14} /> Delete Division</button>
+                    </div>
+                  </div>
+                  <div className="division-roster-section">
+                    <div className="division-subheading">
+                      <b>Assigned Judge Roster</b>
+                      {rosterValid ? <span className="pill">Finalized</span> : <span className="pill danger">Needs setup</span>}
+                    </div>
+                    {roster.length ? (
+                      <div className="division-roster-list">
+                        {roster.map((judge) => (
+                          <div className="division-roster-judge" key={`${judge.slot}-${judge.user_id}`}>
+                            <b>Judge {judge.slot}</b>
+                            <span>{judge.name}{judge.username ? ` · @${judge.username}` : ""}</span>
+                            <small>{judge.scoring_type === "technical" ? "Technical Judge" : "Performance Judge"}</small>
+                          </div>
+                        ))}
                       </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </section>
-            {canManageScoringConfig && adminUnlocked && showPoints && adminUnlockToken ? (
-              <TechnicalPointConfiguration
-                adminUnlockToken={adminUnlockToken}
-                queuedActions={workspace?.queue.length ?? 0}
-                oldestQueuedRevision={oldestQueuedConfigRevision}
-                onSaved={() => {
-                  if (workspace?.queue.length) {
-                    setScoringReconciliationNotice("Pending offline score selections will be calculated with the updated rules when they sync.");
-                  }
-                  void refresh();
-                }}
-              />
-            ) : null}
-            <section className="panel records">
-              <div className="panel-heading">
-                <h3>Competitor Roster</h3>
-                <button
-                  className="primary"
-                  disabled={!allDivisions.length}
-                  onClick={() =>
-                    setCompetitorEdit({
-                      name: "",
-                      division: allDivisions[0] ?? "",
-                      position: state.competitors.length + 1,
-                      status: "upcoming",
-                      dq: false,
-                      archived: false,
-                    })
-                  }
-                >
-                  <Plus size={16} /> Add Competitor
-                </button>
-              </div>
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Order</th>
-                      <th>Competitor</th>
-                      <th>Division</th>
-                      <th>Status</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...state.competitors]
-                      .sort((a, b) => a.position - b.position)
-                      .map((c) => (
-                        <tr key={c.id}>
-                          <td>{c.position}</td>
-                          <td>
-                            <b>{c.name}</b>
-                            {c.dq && <span className="pill danger">DQ</span>}
-                          </td>
-                          <td>{c.division}</td>
-                          <td>{c.archived ? "Legacy inactive" : c.status}</td>
-                          <td>
-                            <div className="row-actions">
-                              <button onClick={() => setCompetitorEdit(c)}>
-                                <Pencil size={13} /> Edit
-                              </button>
-                              <button
-                                className="danger-button"
-                                title="Delete competitor and saved scoring data"
-                                onClick={() => setModal({
-                                  title: `Delete ${c.name}?`,
+                    ) : <p className="muted">No judges have been assigned yet.</p>}
+                    {!rosterValid ? (
+                      <div className="division-roster-empty">
+                        <p>A division needs 2–10 unique judges, numbered from 1, including at least one Technical and one Performance Judge. Organizers only score when explicitly assigned.</p>
+                        <button type="button" disabled={demo || competitors.length > 0} onClick={() => openFinalizeDivisionRoster(division)}>
+                          <Users size={14} /> Finalize Judge Roster
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="division-competitors-section">
+                    <div className="division-subheading">
+                      <b>Competitors</b>
+                      <span className="muted">Manual activation · no automatic advance</span>
+                    </div>
+                    {competitors.length ? (
+                      <div className="division-competitor-list">
+                        {competitors.map((competitor, index) => {
+                          const progress = competitorProgress(
+                            competitor,
+                            normalizedDivisionAssignments,
+                            state.judgeRoster ?? [],
+                            state.submissions,
+                            state.profiles ?? [],
+                          );
+                          const status = progress.complete ? "progress-complete" : competitor.status === "active" || progress.started ? "progress-active" : "progress-not-started";
+                          const label = competitor.archived ? "Archived" : progress.complete ? "Complete" : competitor.status === "active" ? "Active · in progress" : progress.started ? "In progress" : "Not started";
+                          const canReopen = !competitor.archived && competitor.status === "locked" && state.submissions.some((submission) => submission.competitor_id === competitor.id);
+                          const canActivate = !competitor.archived && competitor.status === "upcoming" && competitor.id === firstUpcoming?.id;
+                          return (
+                            <article className={`division-competitor-card ${status}`} key={competitor.id}>
+                              <div className="division-competitor-topline">
+                                <span className="division-order">{competitor.position}.</span>
+                                <h4>{competitor.name}{competitor.archived ? <span className="pill">Archived</span> : null}{competitor.dq ? <span className="pill danger">DQ</span> : null}</h4>
+                                <span className={`division-competitor-status ${status}`}>{label}</span>
+                              </div>
+                              <div className="division-judge-progress">
+                                {divisionRosterIsValid(progress.entries.map(({ slot, scoring_type }) => ({ slot, scoring_type }))) ? progress.entries.map((entry) => (
+                                  <span key={`${entry.slot}-${entry.user_id}`} className={`judge-progress ${entry.status === "Submitted" ? "finished" : entry.status === "Pending" ? "not-started" : "draft"}`} title={`${entry.scoring_type === "technical" ? "Technical" : "Performance"} Judge · ${entry.name}`}>
+                                    <b>Judge {entry.slot}</b><em>{entry.status}</em>
+                                  </span>
+                                )) : <span className="assignment-warning">This competitor has no valid frozen roster. Do not activate it; contact the administrator.</span>}
+                              </div>
+                              <div className="row-actions division-competitor-actions">
+                                <button type="button" onClick={() => setCompetitorEdit(competitor)}><Pencil size={13} /> Edit</button>
+                                <button type="button" disabled={index === 0} onClick={() => {
+                                  const previous = competitors[index - 1];
+                                  if (previous) void manage("save", { ...competitor, position: previous.position });
+                                }}>Move up</button>
+                                <button type="button" disabled={index === competitors.length - 1} onClick={() => {
+                                  const next = competitors[index + 1];
+                                  if (next) void manage("save", { ...competitor, position: next.position });
+                                }}>Move down</button>
+                                <button type="button" className="danger-button" title="Delete competitor and saved scoring data" onClick={() => setModal({
+                                  title: `Delete ${competitor.name}?`,
                                   body: (() => {
-                                    const submissionCount = state.submissions.filter((submission) => submission.competitor_id === c.id).length;
-                                    const submissionImpact = submissionCount
-                                      ? ` This will also permanently delete ${submissionCount} saved judge submission${submissionCount === 1 ? "" : "s"} and their scores.`
-                                      : " This competitor has no saved judge submissions.";
-                                    const activeImpact = c.status === "active" ? " The active routine will end." : "";
-                                    return `This permanently deletes ${c.name} from the roster.${submissionImpact}${activeImpact} Any unsynced offline work for this competitor will not sync afterward. Existing audit history is retained. This cannot be undone.`;
+                                    const submissionCount = state.submissions.filter((submission) => submission.competitor_id === competitor.id).length;
+                                    const scores = submissionCount ? ` This permanently deletes ${submissionCount} saved judge submission${submissionCount === 1 ? "" : "s"} and their scores.` : " No saved judge submissions exist.";
+                                    return `This permanently deletes ${competitor.name} from ${division}.${scores} Any unsynced offline work for this competitor will not sync afterward. This cannot be undone.`;
                                   })(),
-                                  action: () => void manage("delete", { id: c.id }),
+                                  action: () => void manage("delete", { id: competitor.id }),
                                   confirmLabel: "Delete Competitor",
                                   danger: true,
-                                })}
-                              >
-                                <Trash2 size={13} /> Delete
-                              </button>
-                              <button
-                                disabled={
-                                  c.archived || c.status === "active" ||
-                                  (c.status === "upcoming" && c.id !== nextUpcoming?.id) ||
-                                  (c.status === "locked" && !state.submissions.some((s) => s.competitor_id === c.id))
-                                }
-                                onClick={() =>
-                                  (() => {
-                                    const previous = state.competitors.find((row) => row.status === "active" && row.id !== c.id);
-                                    const reopening = c.status === "locked";
+                                })}><Trash2 size={13} /> Delete</button>
+                                {canActivate || canReopen ? (
+                                  <button type="button" className={canReopen ? "danger-button" : "primary"} onClick={() => {
+                                    const previous = active && active.id !== competitor.id ? active : undefined;
+                                    const reopening = canReopen;
                                     setModal({
-                                      title: reopening ? `Reopen ${c.name} for Everyone?` : `Activate ${c.name}?`,
-                                      body: `${previous ? `${previous.name} will be locked. ` : ""}This switches the shared active competitor for every judge assigned to ${c.division}. ${reopening ? "Submitted scores will unlock for those judges; their saved work stays intact." : ""}`,
-                                      action: () => void manage("activate", { id: c.id }),
-                                      confirmLabel: reopening ? "Reopen for Everyone" : "Activate Competitor",
+                                      title: reopening ? `Reopen ${competitor.name} for ${division}?` : `Activate ${competitor.name}?`,
+                                      body: `${previous ? `${previous.name} (${previous.division}) will be locked. ` : ""}This opens scoring only for judges assigned to ${division}. ${reopening ? "Submitted work will be unlocked for those judges until it is submitted again." : "The next activation remains a separate organizer action."}`,
+                                      action: () => void manage("activate", { id: competitor.id }),
+                                      confirmLabel: reopening ? "Reopen for Division Judges" : "Activate Competitor",
                                       danger: reopening,
                                     });
-                                  })()
-                                }
-                              >
-                                {c.status === "locked" ? "Reopen for Everyone" : "Activate"}
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                                  }}>{canReopen ? "Reopen for Judges" : "Activate"}</button>
+                                ) : null}
+                                {competitor.status === "upcoming" && !canActivate ? <span className="division-order-hint">Move this competitor earlier in this division’s order before activation.</span> : null}
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : <div className="division-empty-state">No competitors in this division yet. Finalize its judge roster, then add the first competitor.</div>}
+                  </div>
+                </section>
+              );
+            })}
             <section className="panel records">
               <div className="panel-heading">
                 <h3>
@@ -3409,8 +3298,8 @@ export default function Page() {
                       Competitor: r.competitor.name,
                       Division: r.competitor.division,
                       Order: r.competitor.position,
-                      ...Object.fromEntries(technicalJudges.map((judge, index) => [`Technical · ${judge.display_name}`, r.technical[index]])),
-                      ...Object.fromEntries(performanceJudges.map((judge, index) => [`Performance · ${judge.display_name}`, r.performance[index]])),
+                      ...Object.fromEntries(technicalJudges.map((judge, index) => [`Technical · Judge ${judge.roster_order}`, r.technical[index]])),
+                      ...Object.fromEntries(performanceJudges.map((judge, index) => [`Performance · Judge ${judge.roster_order}`, r.performance[index]])),
                       Raw: r.raw,
                       Scaled: r.scaled,
                       Performance: r.average,
@@ -3535,6 +3424,22 @@ export default function Page() {
                 <button className="primary">Update Shared Password <ArrowRight size={16} /></button>
               </form>
             </section>
+            {canManageScoringConfig && adminUnlocked && showPoints && adminUnlockToken ? (
+              <details className="technical-point-config-details">
+                <summary>Technical Point Configuration</summary>
+                <TechnicalPointConfiguration
+                  adminUnlockToken={adminUnlockToken}
+                  queuedActions={workspace?.queue.length ?? 0}
+                  oldestQueuedRevision={oldestQueuedConfigRevision}
+                  onSaved={() => {
+                    if (workspace?.queue.length) {
+                      setScoringReconciliationNotice("Pending offline score selections will be calculated with the updated rules when they sync.");
+                    }
+                    void refresh();
+                  }}
+                />
+              </details>
+            ) : null}
           </div>
         )}
       </main>
@@ -3699,6 +3604,82 @@ export default function Page() {
           })()}
         </Dialog>
       )}
+      {divisionFormTarget && (
+        <Dialog
+          title={divisionFormTarget.creating ? "Create Division" : `Finalize ${divisionFormTarget.division} Roster`}
+          close={() => { setDivisionFormTarget(null); setDivisionFormError(""); }}
+        >
+          <form className="division-roster-form" onSubmit={addDivision}>
+            {divisionFormTarget.creating ? (
+              <label>
+                Division name
+                <input autoFocus required maxLength={80} value={newDivision} onChange={(event) => setNewDivision(event.target.value)} />
+              </label>
+            ) : (
+              <p className="info-note">Assign each judge once and number them consecutively from 1. The numbered roster is frozen for competitors in this division.</p>
+            )}
+            <p className="division-form-help">Assign 2–10 judges. Include at least one Technical Judge and one Performance Judge. Organizers are eligible only when explicitly assigned.</p>
+            <div className="division-roster-form-list">
+              {divisionRosterDraft.map((row, index) => {
+                const usedElsewhere = new Set(divisionRosterDraft.filter((_, rowIndex) => rowIndex !== index).map((other) => other.user_id).filter(Boolean));
+                const eligibleProfiles = divisionProfiles.filter((candidate) => profileCanScoreType(candidate, row.scoring_type));
+                return (
+                  <div className="division-roster-form-row" key={index}>
+                    <label>
+                      Judge number
+                      <input type="number" min={1} max={10} required value={row.slot} onChange={(event) => setDivisionRosterDraft((prior) => prior.map((current, rowIndex) => rowIndex === index ? { ...current, slot: Number(event.target.value) } : current))} />
+                    </label>
+                    <label>
+                      Role
+                      <select value={row.scoring_type} onChange={(event) => {
+                        const scoring_type = event.target.value as ScoringType;
+                        const account = divisionProfiles.find((candidate) => candidate.id === row.user_id);
+                        setDivisionRosterDraft((prior) => prior.map((current, rowIndex) => rowIndex === index ? {
+                          ...current,
+                          scoring_type,
+                          user_id: account && profileCanScoreType(account, scoring_type) ? current.user_id : "",
+                        } : current));
+                      }}>
+                        <option value="technical">Technical Judge</option>
+                        <option value="performance">Performance Judge</option>
+                      </select>
+                    </label>
+                    <label>
+                      Judge account
+                      <select required value={row.user_id} onChange={(event) => setDivisionRosterDraft((prior) => prior.map((current, rowIndex) => rowIndex === index ? { ...current, user_id: event.target.value } : current))}>
+                        <option value="">Select account</option>
+                        {eligibleProfiles.map((candidate) => (
+                          <option key={candidate.id} value={candidate.id} disabled={usedElsewhere.has(candidate.id)}>
+                            {candidate.name} · @{candidate.username}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button type="button" disabled={divisionRosterDraft.length <= 2} aria-label={`Remove Judge ${row.slot}`} onClick={() => setDivisionRosterDraft((prior) => prior.filter((_, rowIndex) => rowIndex !== index).map((current, rowIndex) => ({ ...current, slot: rowIndex + 1 })))}>
+                      <Trash2 size={14} /> Remove
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="division-roster-form-actions">
+              <button type="button" disabled={divisionRosterDraft.length >= 10} onClick={() => setDivisionRosterDraft((prior) => {
+                const technicalCount = prior.filter((row) => row.scoring_type === "technical").length;
+                const performanceCount = prior.filter((row) => row.scoring_type === "performance").length;
+                const scoring_type: ScoringType = technicalCount === 0 ? "technical" : performanceCount === 0 ? "performance" : technicalCount <= performanceCount ? "technical" : "performance";
+                return [...prior, { slot: prior.length + 1, user_id: "", scoring_type }];
+              })}><Plus size={14} /> Add Judge</button>
+            </div>
+            {divisionFormError ? <p className="error" role="alert">{divisionFormError}</p> : null}
+            <div className="dialog-actions">
+              <button type="button" onClick={() => { setDivisionFormTarget(null); setDivisionFormError(""); }}>Cancel</button>
+              <button className="primary" disabled={demo || !divisionRosterDraftValid || (divisionFormTarget.creating && (!newDivision.trim() || allDivisions.some((division) => division.toLowerCase() === newDivision.trim().toLowerCase())))}>
+                {divisionFormTarget.creating ? "Create Division and Finalize Roster" : "Finalize Judge Roster"}
+              </button>
+            </div>
+          </form>
+        </Dialog>
+      )}
       {divisionDeleteTarget && (
         <Dialog title="Permanently Delete Division?" close={() => { setDivisionDeleteTarget(""); setDivisionDeleteConfirmation(""); }}>
           {(() => {
@@ -3761,20 +3742,8 @@ export default function Page() {
             </label>
             <label>
               Division
-              <select
-                required
-                value={competitorEdit.division}
-                onChange={(e) =>
-                  setCompetitorEdit({
-                    ...competitorEdit,
-                    division: e.target.value,
-                  })
-                }
-              >
-                {allDivisions.map((d) => (
-                  <option key={d}>{d}</option>
-                ))}
-              </select>
+              <input required value={competitorEdit.division ?? ""} readOnly />
+              {competitorEdit.id ? <small className="muted">Competitors stay in their frozen division roster.</small> : null}
             </label>
             {!competitorEdit.id && !competitorDraftRosterValid && (
               <p className="info-note" role="status">
@@ -3782,7 +3751,7 @@ export default function Page() {
               </p>
             )}
             <label>
-              Performance order
+              Order within division
               <input
                 type="number"
                 min="1"
