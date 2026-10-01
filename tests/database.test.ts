@@ -649,7 +649,7 @@ test("PostgreSQL migration enforces RLS, lifecycle, deduplication, versions and 
   await db.exec(migration("cascade_unlock_attempts_on_profile_delete.sql"));
   await db.exec(migration("track_competitor_score_operations_and_delete_division.sql"));
   await db.exec(migration("_patch_performance_scores_by_category.sql"));
-  await db.exec(migration("20261001041641_division_centered_event_management.sql"));
+  await db.exec(migration("20261001043822_division_centered_event_management.sql"));
   assert.equal((await db.query<{ count: number }>("select count(*)::int as count from operations where competitor_id=$1", [comp])).rows[0].count > 0, true, "legacy score receipts are backfilled from unambiguous same-transaction audit records");
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('anon','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);
   assert.equal((await db.query<{ allowed: boolean }>("select has_function_privilege('authenticated','public.delete_division(uuid,text,text)','execute') as allowed")).rows[0].allowed, false);

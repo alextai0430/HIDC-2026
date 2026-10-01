@@ -106,6 +106,7 @@ export async function GET(req: Request) {
       competitors,
       protected: fullAccess,
       pointAccess: revealPoints,
+      ...(revealPoints ? { scoringRules: scoringConfiguration.rules } : {}),
       scoringConfigRevision: scoringConfiguration.revision,
       personal,
       submissions,

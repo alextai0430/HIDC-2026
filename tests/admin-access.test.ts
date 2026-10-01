@@ -741,6 +741,7 @@ test("state endpoint masks score data until unlock and only returns own judge po
     assert.equal(response.headers.get("Cache-Control"), "no-store");
     const hiddenBody = await response.json();
     assert.equal(hiddenBody.pointAccess, false);
+    assert.equal(hiddenBody.scoringRules, undefined, "configured technical values stay out of masked state responses");
     for (const submission of hiddenBody.submissions) {
       const ownPerformance = p.role === "performance_judge" &&
         submission.user_id === p.id && submission.scoring_type === "performance";
@@ -790,6 +791,7 @@ test("state endpoint masks score data until unlock and only returns own judge po
     assert.equal(unlockedButHidden.status, 200);
     const stillHidden = await unlockedButHidden.json();
     assert.equal(stillHidden.pointAccess, false, "Admin unlock alone must not reveal points");
+    assert.equal(stillHidden.scoringRules, undefined, "Admin unlock without Show Points does not reveal configured values");
     for (const saved of stillHidden.submissions) {
       const ownPerformance = p.role === "performance_judge" &&
         saved.user_id === p.id && saved.scoring_type === "performance";
@@ -805,6 +807,7 @@ test("state endpoint masks score data until unlock and only returns own judge po
     assert.equal(unlocked.status, 200);
     const visibleBody = await unlocked.json();
     assert.equal(visibleBody.pointAccess, true);
+    assert.deepEqual(visibleBody.scoringRules, liveRules, "valid Admin + Show Points access returns configuration for scoring controls");
     for (const saved of visibleBody.submissions.filter((row: any) => row.scoring_type === "technical")) {
       assert.equal(saved.total, 9);
       assert.equal(saved.events[0].value, 9);
@@ -1513,6 +1516,7 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
       audit: [{ secret: "audit-data" }],
       rankings: [],
       personal: [{ competitor_id: own.competitor_id, rank: 1, total: 6 }],
+      scoringRules: DEFAULT_SCORING_RULES,
     },
     queue: [
       {
@@ -1526,6 +1530,7 @@ test("administrator snapshot is sanitized for offline storage without losing Jud
   };
   const cached = sanitizeWorkspace(workspace);
   assert.equal(cached.snapshot.protected, false);
+  assert.equal(cached.snapshot.scoringRules, undefined, "configured point values never persist in the offline cache");
   for (const key of ["profiles", "audit", "rankings"] as const)
     assert.equal(cached.snapshot[key], undefined);
   assert.equal(cached.snapshot.submissions.length, 1);

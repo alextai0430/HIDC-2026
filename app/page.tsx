@@ -113,9 +113,9 @@ const fmt = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2))
 const uid = () => crypto.randomUUID();
 const executionControlLabels: Record<(typeof executionOptions)[number], string> = {
   E0: "E0",
-  "E-1": "E−1",
-  "E-2": "E−2",
-  "E-3": "E−3",
+  "E-1": "E-1",
+  "E-2": "E-2",
+  "E-3": "E-3",
 };
 
 type AccountFormState =
@@ -2307,8 +2307,13 @@ export default function Page() {
                                 className={`trick ${trick === id ? "selected" : ""}`}
                                 onClick={() => setTrick(id)}
                               >
-                                <span>
-                                  {type} <b>{dim}</b>
+                                <span className="control-selection">
+                                  <span className="control-label">{type} <b>{dim}</b></span>
+                                  {canViewPoints && state.scoringRules && (
+                                    <small className="control-point-value">
+                                      {fmt(state.scoringRules.bases[type]?.[dim])} pts
+                                    </small>
+                                  )}
                                 </span>
                                 {keysEnabled && <kbd>{hotkeys[id]}</kbd>}
                               </button>
@@ -2347,6 +2352,9 @@ export default function Page() {
                             onClick={() => setLevel(n)}
                           >
                             L{n}
+                            {canViewPoints && state.scoringRules && (
+                              <small className="control-point-value">×{fmt(state.scoringRules.levels[String(n)])}</small>
+                            )}
                           </button>
                         ))}
                       </div>
@@ -2368,6 +2376,9 @@ export default function Page() {
                             onClick={() => toggleFeature(f)}
                           >
                             {f}
+                            {canViewPoints && state.scoringRules && (
+                              <small className="control-point-value">×{fmt(state.scoringRules.features[f])}</small>
+                            )}
                           </button>
                         ))}
                       </div>
@@ -2387,7 +2398,9 @@ export default function Page() {
                             onClick={() => setExecution(option)}
                           >
                             <span>{executionControlLabels[option]}</span>
-                            <kbd>{keysEnabled ? hotkeys[`execution:${option}`] : ""}</kbd>
+                            {canViewPoints && state.scoringRules && (
+                              <small className="control-point-value">×{fmt(state.scoringRules.executions[option])}</small>
+                            )}
                           </button>
                         ))}
                       </div>
@@ -2409,7 +2422,12 @@ export default function Page() {
                           className={trick === d ? "selected" : ""}
                           onClick={() => setTrick(d)}
                         >
-                          {d}
+                          <span className="control-selection">
+                            <span>{d}</span>
+                            {canViewPoints && state.scoringRules && (
+                              <small className="control-point-value">{fmt(state.scoringRules.deductions[d])}</small>
+                            )}
+                          </span>
                           <kbd>{keysEnabled ? hotkeys[d] : ""}</kbd>
                         </button>
                       ))}
@@ -3130,7 +3148,6 @@ export default function Page() {
                   <div className="division-competitors-section">
                     <div className="division-subheading">
                       <b>Competitors</b>
-                      <span className="muted">Manual activation · no automatic advance</span>
                     </div>
                     {competitors.length ? (
                       <div className="division-competitor-list">

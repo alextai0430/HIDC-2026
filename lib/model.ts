@@ -148,6 +148,8 @@ export type Snapshot = {
   }[];
   // True only when the server accepted this page's in-memory Admin unlock token.
   pointAccess?: boolean;
+  // Sent only by /api/state when this request has valid Admin + Show Points access.
+  scoringRules?: ScoringRules;
   // Safe non-numeric version metadata; used to flag stale offline queues.
   scoringConfigRevision?: number;
   scoringWindow?: {

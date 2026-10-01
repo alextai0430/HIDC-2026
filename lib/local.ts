@@ -45,6 +45,7 @@ export function sanitizeWorkspace(value: LocalWorkspace): LocalWorkspace {
   delete snapshot.profile.avatar_url;
   snapshot.protected = false;
   snapshot.pointAccess = false;
+  delete snapshot.scoringRules;
   snapshot.submissions = snapshot.submissions
     .filter((s) => s.user_id === snapshot.profile.id)
     .map((s) => {
