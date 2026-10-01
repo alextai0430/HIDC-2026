@@ -1,3 +1,4 @@
+-- Version aligned with the production migration ledger entry.
 BEGIN;
 
 -- Bring pre-existing sequences into the independent per-division order used
