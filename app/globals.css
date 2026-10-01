@@ -165,9 +165,8 @@ header {
   height: 56px;
   display: block;
   object-fit: contain;
-  background: #fff;
+  background: transparent;
   flex-shrink: 0;
-  border-radius: 6px;
 }
 .brand strong {
   font-size: 24px;

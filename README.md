@@ -1,6 +1,6 @@
 # HIDC 2026 Judge Console
 
-Next.js, TypeScript, Tailwind CSS, Supabase Auth/Postgres/Realtime, and IndexedDB. The interface defaults to light; the NDL emblem and HIDC wordmark in the judge console toggle a locally persisted dark theme. The supplied NDL emblem is stored in `public/ndl-emblem.jpg`.
+Next.js, TypeScript, Tailwind CSS, Supabase Auth/Postgres/Realtime, and IndexedDB. The interface defaults to light; the NDL emblem and HIDC wordmark in the judge console toggle a locally persisted dark theme. The supplied transparent NDL emblem is stored in `public/ndl-emblem.png`.
 
 ## Run the local demo
 

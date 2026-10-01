@@ -1718,9 +1718,11 @@ export default function Page() {
           <div className="brand">
             <Image
               className="brand-logo"
-              src="/ndl-emblem.jpg"
-              width={56}
-              height={56}
+              src="/ndl-emblem.png"
+              width={88}
+              height={88}
+              sizes="88px"
+              priority
               alt="National Diabolo League"
             />
             <strong>
@@ -1778,11 +1780,13 @@ export default function Page() {
             changeThemePreference(next);
           }}
         >
-          <img
+          <Image
             className="brand-logo"
-            src="/ndl-emblem.jpg"
+            src="/ndl-emblem.png"
             width={56}
             height={56}
+            sizes="56px"
+            priority
             alt="National Diabolo League"
           />
           <strong>

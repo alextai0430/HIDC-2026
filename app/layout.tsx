@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "HIDC 2026 · Judge Console",
   description: "Houston International Diabolo Competition scoring workspace",
-  icons: { icon: "/favicon.svg" },
+  icons: { icon: "/ndl-emblem.png" },
 };
 export default function RootLayout({
   children,
