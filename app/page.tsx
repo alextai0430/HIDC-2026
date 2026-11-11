@@ -61,11 +61,21 @@ import TechnicalPointConfiguration from "@/app/components/technical-point-config
 import AppearanceSettings, { type AppearanceSaveResult } from "@/app/components/appearance-settings";
 import { applyAppearance, AppearancePreferences, defaultAppearance, normalizeAppearancePreferences } from "@/lib/appearance";
 import {
-  detailExportRows,
   detailSubmissions,
   ownSubmissions,
   personalScoreExportRows,
 } from "@/lib/scoped";
+import {
+  compactTechnicalNotation,
+  divisionResultsJudges,
+  rankDivisionView,
+  rankingResultsExportRows,
+  resultsViewLabel,
+  scoreDetailsForCompetitor,
+  scoreDetailsExportRows,
+  scoreForAssignedJudge,
+  type ResultsView,
+} from "@/lib/results";
 import {
   competitorProgress,
   divisionCompetitors,
@@ -174,6 +184,7 @@ function SubmissionEventDetail({
         <b className="detail-event-title">
           <span className="detail-event-index">{index + 1}.</span> {event.trick}
         </b>
+        <code className="detail-event-notation">{compactTechnicalNotation(event)}</code>
         <span className="detail-event-meta">
           {deduction
             ? "Deduction"
@@ -307,6 +318,10 @@ export default function Page() {
     [tab, setTab] = useState("Technical"),
     [technicalViewJudgeId, setTechnicalViewJudgeId] = useState(""),
     [performanceViewJudgeId, setPerformanceViewJudgeId] = useState(""),
+    [resultsDivisionSelection, setResultsDivisionSelection] = useState(""),
+    [resultsViewSelection, setResultsViewSelection] = useState<ResultsView>("overall"),
+    [detailsDivisionSelection, setDetailsDivisionSelection] = useState(""),
+    [detailsCompetitorSelection, setDetailsCompetitorSelection] = useState(""),
     [selected, setSelected] = useState<string | null>(null),
     [theme, setTheme] = useState("light");
   const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
@@ -447,6 +462,53 @@ export default function Page() {
     ...(state ? state.divisions ?? [] : divisions),
     ...(state?.competitors.map((c) => c.division) ?? []),
   ]));
+  const resultsDivisionOptions = allDivisions.filter((division) => division !== "Exhibition");
+  const resultsDivision = resultsDivisionOptions.includes(resultsDivisionSelection)
+    ? resultsDivisionSelection
+    : resultsDivisionOptions[0] ?? "";
+  const resultsDivisionCompetitors = (state?.competitors ?? [])
+    .filter((competitor) => competitor.division === resultsDivision && !competitor.archived)
+    .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+  const resultsJudges = divisionResultsJudges(
+    resultsDivision,
+    state?.judgeRoster,
+    state?.assignments,
+    state?.competitors,
+  );
+  const resultViewChoices: ResultsView[] = [
+    "overall",
+    "technical",
+    "performance",
+    ...resultsJudges.map((judge) => `judge:${judge.scoring_type}:${judge.user_id}` as ResultsView),
+  ];
+  const resultsView = resultViewChoices.includes(resultsViewSelection) ? resultsViewSelection : "overall";
+  const divisionResults = canViewPoints && resultsDivision
+    ? rankDivisionView(state?.rankings ?? [], resultsDivision, resultsView)
+    : [];
+  const detailCompetitorOptions = server
+    ? (state?.competitors ?? []).filter((competitor) => !competitor.archived)
+    : (state?.competitors ?? []).filter((competitor) => visibleSubmissions.some((submission) => submission.competitor_id === competitor.id));
+  const detailsDivisionOptions = Array.from(new Set(detailCompetitorOptions.map((competitor) => competitor.division)));
+  const detailsDivision = detailsDivisionOptions.includes(detailsDivisionSelection)
+    ? detailsDivisionSelection
+    : detailsDivisionOptions[0] ?? "";
+  const detailsCompetitors = detailCompetitorOptions
+    .filter((competitor) => competitor.division === detailsDivision)
+    .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+  const detailsCompetitor = detailsCompetitors.find((competitor) => competitor.id === detailsCompetitorSelection)
+    ?? detailsCompetitors[0]
+    ?? null;
+  const detailRoster = detailsCompetitor
+    ? divisionResultsJudges(
+        detailsCompetitor.division,
+        state?.judgeRoster,
+        state?.assignments,
+        [detailsCompetitor],
+      ).filter((judge) => server || judge.user_id === profile?.id)
+    : [];
+  const competitorDetailRows = detailsCompetitor
+    ? scoreDetailsForCompetitor(detailsCompetitor.id, detailRoster, visibleSubmissions)
+    : [];
   const syncStatus = demo
     ? "Score saved locally · demo"
     : syncError && workspace?.queue.length
@@ -2702,186 +2764,236 @@ export default function Page() {
             </div>
           </section>
         )}
-        {tab === "Rankings" && (
+        {tab === "Rankings" && (server ? (
+          <section className="panel records results-panel">
+            <div className="results-heading">
+              <div>
+                <span className="eyebrow">COMPETITION RESULTS</span>
+                <h2><Trophy size={21} /> Rankings</h2>
+                <p>{resultsDivision || "No division selected"} · {resultsDivisionCompetitors.length} competitors</p>
+              </div>
+              <div className="results-selectors">
+                <label>
+                  Division
+                  <select value={resultsDivision} onChange={(event) => {
+                    setResultsDivisionSelection(event.target.value);
+                    setResultsViewSelection("overall");
+                  }}>
+                    {resultsDivisionOptions.map((division) => <option key={division} value={division}>{division}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Rank by
+                  <select value={resultsView} onChange={(event) => setResultsViewSelection(event.target.value as ResultsView)}>
+                    <option value="overall">Overall · Weighted Final</option>
+                    <option value="technical">Technical · Average raw</option>
+                    <option value="performance">Performance · Average raw</option>
+                    {resultsJudges.map((judge) => {
+                      const value = `judge:${judge.scoring_type}:${judge.user_id}`;
+                      return <option key={value} value={value}>{judge.scoring_type === "technical" ? "Technical" : "Performance"} · Judge {judge.roster_order}</option>;
+                    })}
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div className="results-view-summary">
+              <span>Ranked by <b>{resultsViewLabel(resultsView, resultsJudges)}</b></span>
+              <span>Technical normalized to 70 · Performance averaged to 30</span>
+            </div>
+            {canViewPoints ? (
+              <div className="exports results-exports">
+                {(["csv", "txt"] as const).map((format) => (
+                  <button key={format} onClick={() => download(
+                    rankingResultsExportRows(divisionResults, resultsJudges, resultsView, canViewPoints),
+                    format,
+                    `rankings-${resultsDivision.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${resultsView.split(":")[0]}`,
+                  )}>
+                    <Download size={14} /> Export {format.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="masked-points-note" role="status">Unlock Admin and turn on Show Points to view or export numeric results.</p>
+            )}
+            {resultsDivision ? (
+              <div className="table-scroll results-table-scroll">
+                <table className="results-table">
+                  <thead>
+                    <tr>
+                      <th>Rank</th>
+                      <th>Competitor</th>
+                      {resultsJudges.filter((judge) => judge.scoring_type === "technical").map((judge) => <th key={`t-${judge.user_id}`}>Technical · Judge {judge.roster_order}</th>)}
+                      <th>Average Technical raw</th>
+                      <th>Normalized /70</th>
+                      {resultsJudges.filter((judge) => judge.scoring_type === "performance").map((judge) => <th key={`p-${judge.user_id}`}>Performance · Judge {judge.roster_order}</th>)}
+                      <th>Average Performance /30</th>
+                      <th>Weighted Final /100</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {canViewPoints ? divisionResults.map((row) => (
+                      <tr key={row.competitor.id} className={row.dq ? "results-row-dq" : row.viewRank === 1 ? "results-row-first" : ""}>
+                        <td className="results-rank">{row.viewRank ?? "—"}</td>
+                        <td className="results-competitor">{row.competitor.name}</td>
+                        {resultsJudges.filter((judge) => judge.scoring_type === "technical").map((judge) => <td key={`t-${judge.user_id}`}>{fmt(scoreForAssignedJudge(row, judge))}</td>)}
+                        <td>{fmt(row.raw)}</td>
+                        <td>{fmt(row.scaled)}</td>
+                        {resultsJudges.filter((judge) => judge.scoring_type === "performance").map((judge) => <td key={`p-${judge.user_id}`}>{fmt(scoreForAssignedJudge(row, judge))}</td>)}
+                        <td>{fmt(row.average)}</td>
+                        <td className="results-final">{fmt(row.final)}</td>
+                        <td><span className={`results-status ${row.dq ? "is-dq" : row.complete ? "is-complete" : "is-pending"}`}>{row.dq ? "DQ" : row.complete ? "Complete" : "Pending"}</span></td>
+                      </tr>
+                    )) : resultsDivisionCompetitors.map((competitor) => (
+                      <tr key={competitor.id}>
+                        <td>***</td>
+                        <td className="results-competitor">{competitor.name}</td>
+                        {resultsJudges.filter((judge) => judge.scoring_type === "technical").map((judge) => <td key={`t-${judge.user_id}`}>***</td>)}
+                        <td>***</td><td>***</td>
+                        {resultsJudges.filter((judge) => judge.scoring_type === "performance").map((judge) => <td key={`p-${judge.user_id}`}>***</td>)}
+                        <td>***</td><td>***</td><td>—</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!resultsDivisionCompetitors.length && <div className="empty-state results-empty">No competitors in this division yet.</div>}
+                {canViewPoints && !divisionResults.length && resultsDivisionCompetitors.length > 0 && <div className="empty-state results-empty">No ranking data is available for this division yet.</div>}
+              </div>
+            ) : (
+              <div className="empty-state results-empty"><Trophy /><h3>No ranked divisions yet</h3><p>Create a non-exhibition division and add competitors to see results here.</p></div>
+            )}
+          </section>
+        ) : (
           <section className="panel records">
             <div className="panel-heading">
-              <h3>
-                <Trophy size={17} /> Your Personal Rankings
-              </h3>
-              <select
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-              >
-                <option>All Divisions</option>
-                {allDivisions.map((d) => (
-                  <option key={d}>{d}</option>
-                ))}
+              <h3><Trophy size={17} /> Your Personal Rankings</h3>
+              <select value={filter} onChange={(event) => setFilter(event.target.value)}>
+                <option value="All divisions">All divisions</option>
+                {allDivisions.map((division) => <option key={division} value={division}>{division}</option>)}
               </select>
             </div>
             {exports(exportPersonal)}
             <table>
-              <thead>
-                <tr>
-                  <th>Rank</th>
-                  <th>Competitor</th>
-                  <th>Division</th>
-                  {!technical && <th>Your score</th>}
-                </tr>
-              </thead>
+              <thead><tr><th>Rank</th><th>Competitor</th><th>Division</th>{!technical && <th>Your score</th>}</tr></thead>
               <tbody>
-                {(state.personal ?? [])
-                  .filter(
-                    (r) =>
-                      filter === "All divisions" ||
-                      state.competitors.find((c) => c.id === r.competitor_id)
-                        ?.division === filter,
-                  )
-                  .map((r) => {
-                    const c = state.competitors.find(
-                      (c) => c.id === r.competitor_id,
-                    )!;
-                    return (
-                      <tr key={r.competitor_id}>
-                        <td>#{r.rank}</td>
-                        <td>{c.name}</td>
-                        <td>{c.division}</td>
-                        {!technical && <td>{canViewPersonalPoints(r.competitor_id) ? fmt(r.total) : "***"}</td>}
-                      </tr>
-                    );
-                  })}
+                {(state.personal ?? []).filter((row) => filter.toLowerCase() === "all divisions" || state.competitors.find((competitor) => competitor.id === row.competitor_id)?.division === filter).map((row) => {
+                  const competitor = state.competitors.find((candidate) => candidate.id === row.competitor_id)!;
+                  return <tr key={row.competitor_id}><td>#{row.rank}</td><td>{competitor.name}</td><td>{competitor.division}</td>{!technical && <td>{canViewPersonalPoints(row.competitor_id) ? fmt(row.total) : "***"}</td>}</tr>;
+                })}
               </tbody>
             </table>
-            {!state.personal?.length && (
-              <div className="empty-state">
-                <Trophy />
-                <h3>No Submitted Rankings Yet</h3>
-                <p>
-                  Finish and sync a submission to see your personal results.
-                </p>
-              </div>
-            )}
+            {!state.personal?.length && <div className="empty-state"><Trophy /><h3>No Submitted Rankings Yet</h3><p>Finish and sync a submission to see your personal results.</p></div>}
           </section>
-        )}
+        ))}
         {tab === "Score Details" && (
-          <section className="panel records">
-            <div className="panel-heading">
-              <h3>Submission Details</h3>
+          <section className="panel records score-details-panel">
+            <div className="results-heading details-heading">
+              <div>
+                <span className="eyebrow">COMPETITOR RECORD</span>
+                <h2><Layers size={21} /> Score Details</h2>
+                <p>Review each assigned judge’s score for one competitor.</p>
+              </div>
+              <div className="results-selectors">
+                <label>
+                  Division
+                  <select value={detailsDivision} onChange={(event) => {
+                    setDetailsDivisionSelection(event.target.value);
+                    setDetailsCompetitorSelection("");
+                  }}>
+                    {detailsDivisionOptions.map((division) => <option key={division} value={division}>{division}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Competitor
+                  <select value={detailsCompetitor?.id ?? ""} onChange={(event) => setDetailsCompetitorSelection(event.target.value)}>
+                    {detailsCompetitors.map((competitor) => <option key={competitor.id} value={competitor.id}>{competitor.position}. {competitor.name}</option>)}
+                  </select>
+                </label>
+              </div>
             </div>
-            {canViewPoints && <div className="exports">
+            {canViewPoints && detailsCompetitor && <div className="exports results-exports">
               {(["csv", "txt"] as const).map((format) => (
-                <button
-                  key={format}
-                  onClick={() =>
-                    download(
-                      detailExportRows(
-                        profile!,
-                        [...visibleSubmissions].sort((a, b) =>
-                          a.updated_at.localeCompare(b.updated_at),
-                        ),
-                        state.competitors,
-                        canViewPoints,
-                        state.profiles ?? [],
-                      ),
-                      format,
-                      "score-details",
-                    )
-                  }
-                >
+                <button key={format} onClick={() => download(
+                  scoreDetailsExportRows(detailsCompetitor, competitorDetailRows, canViewPoints),
+                  format,
+                  `score-details-${detailsCompetitor.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+                )}>
                   <Download size={14} /> Export {format.toUpperCase()}
                 </button>
               ))}
             </div>}
-            {!canViewPoints && <p className="masked-points-note" role="status">Unlock Admin and turn on Show Points to export full score details.</p>}
-            {visibleSubmissions.map((s) => (
-              <details className="submission-detail" key={s.id}>
-                <summary>
-                  <span>
-                    {
-                      state.competitors.find((c) => c.id === s.competitor_id)
-                        ?.name
-                    }
-                  </span>
-                  <span>{s.scoring_type === "performance" ? "Performance" : s.scoring_type === "technical" ? "Technical" : "Unknown scoring type"} · {state.profiles?.find((judge) => judge.id === s.user_id)?.name ?? (s.user_id === profile?.id ? profile.name : s.judge_name_snapshot ?? "Deleted Judge")}</span>
-                  <span>
-                    {s.finished ? "Submitted" : "Draft"}
-                    {s.dq ? " · DQ" : ""}
-                    {canViewSubmissionPoints(s)
-                      ? ` · Total ${s.total === undefined ? "***" : fmt(s.total)}`
-                      : " · Total ***"}
-                  </span>
-                </summary>
-                {server && (
-                  <div className="row-actions">
-                    {!s.finished && <button
-                      disabled={demo}
-                      onClick={() => setModal({
-                        title: "Mark this submission submitted?",
-                        body: "This change is recorded in the audit log.",
-                        action: () => {
-                          void api("review", { id: s.id, version: s.version, finished: true, dq: s.dq })
-                            .then(refresh).catch((e) => setSyncError(e.message));
-                        },
-                      })}
-                    >Mark submitted</button>}
-                    {s.finished && <button
-                      disabled={demo}
-                      onClick={() => {
-                        const competitor = state.competitors.find((row) => row.id === s.competitor_id);
-                        const previous = state.competitors.find((row) => row.status === "active" && row.id !== s.competitor_id);
-                        setModal({
-                          title: `Reopen ${competitor?.name ?? "competitor"} for Everyone?`,
-                          body: `${previous ? `${previous.name} will be locked. ` : ""}This changes the active scoring target for every judge assigned to ${competitor?.division ?? "this division"}. All their saved work stays intact; submitted judges can edit after the shared reopen.`,
-                          action: () => void manage("activate", { id: s.competitor_id }),
-                          confirmLabel: "Reopen for Everyone",
-                          danger: true,
-                        });
-                      }}
-                    >Reopen Competitor for Everyone</button>}
-                    <button
-                      disabled={demo}
-                      onClick={() =>
-                        setModal({
-                          title: s.dq
-                            ? "Remove DQ?"
-                            : "Disqualify this submission?",
-                          body: "This change is recorded in the audit log.",
-                          action: () => {
-                            void api("review", {
-                              id: s.id,
-                              version: s.version,
-                              finished: s.finished,
-                              dq: !s.dq,
-                            })
-                              .then(refresh)
-                              .catch((e) => setSyncError(e.message));
-                          },
-                        })
-                      }
-                    >
-                      {s.dq ? "Remove DQ" : "Disqualify"}
-                    </button>
+            {!canViewPoints && <p className="masked-points-note" role="status">Score values and exports are hidden until Admin is unlocked and Show Points is on.</p>}
+            {detailsCompetitor ? (
+              <div className="score-details-content">
+                <div className="details-competitor-heading">
+                  <div><span className="eyebrow">{detailsCompetitor.division} · ORDER {detailsCompetitor.position}</span><h3>{detailsCompetitor.name}</h3></div>
+                  <span className={`results-status ${detailsCompetitor.dq ? "is-dq" : detailsCompetitor.status === "locked" ? "is-complete" : "is-pending"}`}>{detailsCompetitor.dq ? "DQ" : detailsCompetitor.status === "active" ? "In progress" : detailsCompetitor.status === "locked" ? "Locked" : "Upcoming"}</span>
+                </div>
+                {competitorDetailRows.length ? (
+                  <div className="score-judge-list">
+                    {competitorDetailRows.map(({ judge, submission: saved }) => {
+                      const judgeLabel = `Judge ${judge.roster_order}`;
+                      const scoringLabel = judge.scoring_type === "technical" ? "Technical" : "Performance";
+                      const status = !saved ? "Not submitted" : saved.dq ? "DQ" : saved.finished ? "Submitted" : "Draft";
+                      return (
+                        <details className="score-judge-detail" key={`${judge.scoring_type}-${judge.user_id}`}>
+                          <summary>
+                            <span className="score-judge-title"><b>{judgeLabel}</b><span>{scoringLabel}</span></span>
+                            <span className={`results-status ${saved?.dq ? "is-dq" : saved?.finished ? "is-complete" : "is-pending"}`}>{status}</span>
+                            <span className="score-judge-total">{saved ? `Raw total · ${canViewSubmissionPoints(saved) ? fmt(saved.total) : "***"}` : "Awaiting score"}</span>
+                          </summary>
+                          {saved ? (
+                            <div className="score-judge-body">
+                              <p className="score-detail-time">Updated {new Date(saved.updated_at).toLocaleString()}{saved.submitted_at ? ` · Submitted ${new Date(saved.submitted_at).toLocaleString()}` : ""}</p>
+                              {saved.scoring_type === "technical" ? (
+                                saved.events.length ? saved.events.map((event, index) => <SubmissionEventDetail key={event.id} event={event} index={index} revealPoints={canViewPoints} />) : <p className="score-detail-empty">No technical events recorded.</p>
+                              ) : (
+                                <div className="performance-detail-grid">
+                                  {categories.map((category, index) => (
+                                    <div className="performance-detail-category" key={category}>
+                                      <span>{category}</span>
+                                      <b>{canViewSubmissionPoints(saved) ? (saved.performance[index] ?? 0).toFixed(1) : "***"}</b>
+                                    </div>
+                                  ))}
+                                  <div className="performance-detail-total"><span>Raw total</span><b>{canViewSubmissionPoints(saved) ? fmt(saved.total) : "***"}</b></div>
+                                </div>
+                              )}
+                              {server && (
+                                <div className="row-actions score-detail-actions">
+                                  {!saved.finished && <button disabled={demo} onClick={() => setModal({
+                                    title: "Mark this submission submitted?",
+                                    body: "This change is recorded in the audit log.",
+                                    action: () => void api("review", { id: saved.id, version: saved.version, finished: true, dq: saved.dq }).then(refresh).catch((error) => setSyncError(error.message)),
+                                  })}>Mark submitted</button>}
+                                  {saved.finished && <button disabled={demo} onClick={() => {
+                                    const previous = state.competitors.find((row) => row.status === "active" && row.id !== saved.competitor_id);
+                                    setModal({
+                                      title: `Reopen ${detailsCompetitor.name} for Everyone?`,
+                                      body: `${previous ? `${previous.name} will be locked. ` : ""}This changes the active scoring target for every judge assigned to ${detailsCompetitor.division}. All their saved work stays intact; submitted judges can edit after the shared reopen.`,
+                                      action: () => void manage("activate", { id: saved.competitor_id }),
+                                      confirmLabel: "Reopen for Everyone",
+                                      danger: true,
+                                    });
+                                  }}>Reopen Competitor for Everyone</button>}
+                                  <button disabled={demo} onClick={() => setModal({
+                                    title: saved.dq ? "Remove DQ?" : "Disqualify this submission?",
+                                    body: "This change is recorded in the audit log.",
+                                    action: () => void api("review", { id: saved.id, version: saved.version, finished: saved.finished, dq: !saved.dq }).then(refresh).catch((error) => setSyncError(error.message)),
+                                  })}>{saved.dq ? "Remove DQ" : "Disqualify"}</button>
+                                </div>
+                              )}
+                            </div>
+                          ) : <p className="score-detail-empty">This assigned judge has not submitted a score.</p>}
+                        </details>
+                      );
+                    })}
                   </div>
+                ) : (
+                  <div className="empty-state">No score details are available for this competitor.</div>
                 )}
-                <p>
-                  {new Date(s.updated_at).toLocaleString()}
-                  {s.submitted_at
-                    ? ` · Submitted ${new Date(s.submitted_at).toLocaleString()}`
-                    : ""}
-                </p>
-                {s.scoring_type === "technical"
-                  ? s.events.map((e, i) => (
-                      <SubmissionEventDetail key={e.id} event={e} index={i} revealPoints={canViewPoints} />
-                    ))
-                  : categories.map((c, i) => (
-                      <div className="detail-event detail-event-category" key={c}>
-                        <b className="detail-event-title">{c}</b>
-                        <b className="detail-event-points">{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
-                      </div>
-                    ))}
-              </details>
-            ))}
-            {!visibleSubmissions.length && (
-              <div className="empty-state">No submissions yet.</div>
+              </div>
+            ) : (
+              <div className="empty-state">No competitors with score records are available.</div>
             )}
             {server && (
               <>
@@ -3272,156 +3384,6 @@ export default function Page() {
                   );
                 })}
               </div>
-            </section>
-            <section className="panel records">
-              <div className="panel-heading">
-                <h3>
-                  <Trophy size={17} /> Global Rankings
-                </h3>
-                <span className="muted">70 technical + 30 performance</span>
-              </div>
-              {canViewPoints && exports((format, ranked) => {
-                const rows = [...(state.rankings ?? [])]
-                  .sort((a, b) =>
-                    ranked
-                      ? a.competitor.division.localeCompare(
-                          b.competitor.division,
-                        ) || (a.rank ?? 999) - (b.rank ?? 999)
-                      : (
-                          state.submissions
-                            .filter(
-                              (s) =>
-                                s.competitor_id === a.competitor.id &&
-                                s.submitted_at,
-                            )
-                            .map((s) => s.submitted_at!)
-                            .sort()[0] ?? "9999"
-                        ).localeCompare(
-                          state.submissions
-                            .filter(
-                              (s) =>
-                                s.competitor_id === b.competitor.id &&
-                                s.submitted_at,
-                            )
-                            .map((s) => s.submitted_at!)
-                            .sort()[0] ?? "9999",
-                        ),
-                  )
-                  .map((r) => {
-                    const technicalJudges = (r.judges ?? []).filter((judge) => judge.scoring_type === "technical");
-                    const performanceJudges = (r.judges ?? []).filter((judge) => judge.scoring_type === "performance");
-                    return {
-                      Rank: r.rank,
-                      Competitor: r.competitor.name,
-                      Division: r.competitor.division,
-                      Order: r.competitor.position,
-                      ...Object.fromEntries(technicalJudges.map((judge, index) => [`Technical · Judge ${judge.roster_order}`, r.technical[index]])),
-                      ...Object.fromEntries(performanceJudges.map((judge, index) => [`Performance · Judge ${judge.roster_order}`, r.performance[index]])),
-                      Raw: r.raw,
-                      Scaled: r.scaled,
-                      Performance: r.average,
-                      Final: r.final,
-                      Complete: r.complete,
-                      DQ: r.dq,
-                    };
-                  });
-                download(
-                  rows,
-                  format,
-                  ranked ? "global-ranked" : "global-order",
-                );
-              })}
-              {!canViewPoints && (
-                <p className="masked-points-note" role="status">Unlock Admin and turn on Show points to view global score details.</p>
-              )}
-              {allDivisions
-                .filter((d) => d !== "Exhibition")
-                .map((d) => {
-                  const divisionCompetitors = state.competitors.filter((competitor) => competitor.division === d);
-                  const competitorIds = new Set(divisionCompetitors.map((competitor) => competitor.id));
-                  const judgeColumns = new Map<string, { user_id: string; scoring_type: ScoringType; roster_order: number; display_name: string }>();
-                  for (const judge of state.judgeRoster ?? []) {
-                    if (competitorIds.has(judge.competitor_id) && judge.expected) {
-                      const key = `${judge.scoring_type}:${judge.user_id}`;
-                      if (!judgeColumns.has(key)) judgeColumns.set(key, {
-                        user_id: judge.user_id, scoring_type: judge.scoring_type,
-                        roster_order: judge.roster_order,
-                        display_name: state.profiles?.find((candidate) => candidate.id === judge.user_id)?.name ?? judge.display_name,
-                      });
-                    }
-                  }
-                  const columns = [...judgeColumns.values()].sort((a, b) =>
-                    a.scoring_type === b.scoring_type
-                      ? a.roster_order - b.roster_order
-                      : a.scoring_type === "technical" ? -1 : 1,
-                  );
-                  const divisionRankings = (state.rankings ?? []).filter((ranking) => ranking.competitor.division === d);
-                  const scoreColumnCount = columns.length + 4;
-                  return (
-                  <div key={d}>
-                    <h3 className="division-title">{d}</h3>
-                    <div className="table-scroll">
-                      <table>
-                        <thead>
-                          <tr>
-                            {[
-                              "Rank",
-                              "Competitor",
-                              ...columns.map((judge) => `${judge.scoring_type === "technical" ? "T" : "P"} · ${judge.display_name}`),
-                              "Raw tech",
-                              "Scaled /70",
-                              "Avg /30",
-                              "Final /100",
-                              "State",
-                            ].map((h) => (
-                              <th key={h}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {canViewPoints
-                            ? divisionRankings.map((r) => {
-                              const technicalValues = new Map((r.judges ?? []).filter((judge) => judge.scoring_type === "technical").map((judge, index) => [judge.user_id, r.technical[index]]));
-                              const performanceValues = new Map((r.judges ?? []).filter((judge) => judge.scoring_type === "performance").map((judge, index) => [judge.user_id, r.performance[index]]));
-                              return (
-                              <tr key={r.competitor.id}>
-                                <td>{r.rank ?? "—"}</td>
-                                <td>{r.competitor.name}</td>
-                                {[
-                                  ...columns.map((judge) => judge.scoring_type === "technical" ? technicalValues.get(judge.user_id) ?? null : performanceValues.get(judge.user_id) ?? null),
-                                  r.raw,
-                                  r.scaled,
-                                  r.average,
-                                  r.final,
-                                ].map((v, i) => (
-                                  <td key={i}>{fmt(v)}</td>
-                                ))}
-                                <td>
-                                  {r.dq
-                                    ? "DQ"
-                                    : r.complete
-                                      ? "Complete"
-                                      : "Pending"}
-                                </td>
-                              </tr>
-                              );
-                            })
-                            : state.competitors
-                                .filter((competitor) => competitor.division === d)
-                                .sort((a, b) => a.position - b.position)
-                                .map((competitor) => (
-                                  <tr key={competitor.id}>
-                                    <td>***</td>
-                                    <td>{competitor.name}</td>
-                                    {Array.from({ length: scoreColumnCount }, (_, index) => <td key={index}>***</td>)}
-                                    <td>—</td>
-                                  </tr>
-                                ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                );})}
             </section>
             <section className="panel records admin-tab-password-panel">
               <div className="panel-heading">

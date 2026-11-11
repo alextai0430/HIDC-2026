@@ -1887,6 +1887,299 @@ select {
 .submission-detail .row-actions {
   margin-top: 15px;
 }
+.results-panel,
+.score-details-panel {
+  overflow: hidden;
+}
+.results-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.85fr);
+  align-items: end;
+  gap: 24px;
+  padding: 22px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.results-heading > div:first-child {
+  display: grid;
+  gap: 7px;
+}
+.results-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 24px;
+}
+.results-heading h2 svg {
+  color: var(--teal);
+}
+.results-heading p {
+  font-size: 13px;
+}
+.results-selectors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.results-selectors label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.results-selectors select {
+  width: 100%;
+  min-height: 40px;
+  color: var(--text);
+  font-size: 12px;
+}
+.results-view-summary {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  padding: 12px 24px;
+  color: var(--muted);
+  background: var(--panel2);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.results-view-summary b {
+  color: var(--text);
+}
+.results-exports {
+  padding: 14px 24px;
+}
+.results-table-scroll {
+  max-height: min(68vh, 760px);
+}
+.results-table {
+  min-width: max-content;
+}
+.results-table th,
+.results-table td {
+  padding: 13px 15px;
+  white-space: nowrap;
+}
+.results-table th:nth-child(n + 3):not(:last-child),
+.results-table td:nth-child(n + 3):not(:last-child) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.results-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.results-table .results-rank {
+  color: var(--teal);
+  font-size: 15px;
+  font-weight: 750;
+}
+.results-table .results-competitor {
+  min-width: 190px;
+  color: var(--text);
+  font-weight: 650;
+  text-align: left;
+}
+.results-table .results-final {
+  color: var(--text);
+  font-weight: 750;
+}
+.results-row-first td {
+  background: color-mix(in srgb, var(--teal-bg) 56%, var(--panel));
+}
+.results-row-dq .results-competitor,
+.results-row-dq .results-rank {
+  color: var(--danger);
+}
+.results-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--panel2);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.results-status.is-complete {
+  border-color: color-mix(in srgb, var(--teal) 35%, var(--border));
+  color: var(--teal);
+  background: var(--teal-bg);
+}
+.results-status.is-dq {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+.results-empty {
+  padding: 38px 24px;
+}
+.details-heading {
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 1fr);
+}
+.details-heading .results-selectors {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.score-details-content {
+  padding: 20px 24px 26px;
+}
+.details-competitor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 3px 2px 17px;
+  border-bottom: 1px solid var(--border);
+}
+.details-competitor-heading > div {
+  display: grid;
+  gap: 5px;
+}
+.details-competitor-heading h3 {
+  font-size: 19px;
+}
+.score-judge-list {
+  display: grid;
+  gap: 10px;
+  padding-top: 15px;
+}
+.score-judge-detail {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.score-judge-detail > summary {
+  display: grid;
+  grid-template-columns: minmax(155px, 1fr) auto minmax(130px, max-content);
+  align-items: center;
+  gap: 12px;
+  padding: 12px 15px;
+  cursor: pointer;
+  background: var(--panel2);
+  list-style-position: inside;
+}
+.score-judge-title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+.score-judge-title b {
+  font-size: 13px;
+}
+.score-judge-title span,
+.score-judge-total {
+  color: var(--muted);
+  font-size: 11px;
+}
+.score-judge-total {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.score-judge-body {
+  padding: 12px 14px 15px;
+}
+.score-detail-time,
+.score-detail-empty {
+  margin: 1px 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.score-detail-empty {
+  padding: 10px 2px 4px;
+}
+.detail-event-notation {
+  grid-area: notation;
+  justify-self: start;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--detail-category) 40%, var(--border));
+  border-radius: 4px;
+  color: var(--detail-category, var(--text));
+  background: var(--panel2);
+  font: 600 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.detail-event-main {
+  grid-template-rows: auto auto auto;
+}
+.detail-event {
+  grid-template-areas: "main points" "notation points" "time time";
+}
+.performance-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+.performance-detail-category,
+.performance-detail-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.performance-detail-category span,
+.performance-detail-total span {
+  color: var(--muted);
+}
+.performance-detail-category b,
+.performance-detail-total b {
+  font-variant-numeric: tabular-nums;
+}
+.performance-detail-total {
+  border-color: color-mix(in srgb, var(--teal) 40%, var(--border));
+  background: var(--teal-bg);
+}
+.score-detail-actions {
+  flex-wrap: wrap;
+}
+@media (max-width: 900px) {
+  .results-heading,
+  .details-heading {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .results-table-scroll {
+    max-height: none;
+  }
+}
+@media (max-width: 620px) {
+  .results-heading,
+  .score-details-content {
+    padding-right: 15px;
+    padding-left: 15px;
+  }
+  .results-selectors,
+  .details-heading .results-selectors {
+    grid-template-columns: 1fr;
+  }
+  .results-view-summary {
+    padding-right: 15px;
+    padding-left: 15px;
+  }
+  .score-judge-detail > summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .score-judge-total {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+  .performance-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 /* Technical scoring palette: one identity per category, shared by controls and history. */
 :root {
   --cat-hash: #f2cd75;
