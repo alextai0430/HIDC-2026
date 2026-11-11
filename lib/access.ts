@@ -8,6 +8,14 @@ export function isAdministrator(profile: Profile) {
 export function canManage(profile: Profile) {
   return isAdministrator(profile);
 }
+
+export function canViewOrganizerResults(profile: Profile) {
+  return (
+    profile.active &&
+    ["organizer", "server_admin"].includes(profile.role) &&
+    ["alexandertai", "organizer"].includes(profile.username?.trim().toLowerCase() ?? "")
+  );
+}
 export function canManageScoringConfiguration(profile: Profile) {
   return (
     isAdministrator(profile) &&

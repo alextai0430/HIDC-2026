@@ -1,7 +1,7 @@
 import { identity, failure } from "@/lib/server";
-import { rankGlobal, total } from "@/lib/scoring";
+import { rankGlobal } from "@/lib/scoring";
 import { Submission } from "@/lib/model";
-import { canManage } from "@/lib/access";
+import { canManage, canViewOrganizerResults } from "@/lib/access";
 import { sanitizeAuditRows } from "@/lib/audit";
 import { requestHasPointAccess } from "@/lib/admin-unlock";
 import { loadScoringConfiguration } from "@/lib/scoring-config";
@@ -11,6 +11,7 @@ export async function GET(req: Request) {
   try {
     const { client, profile } = await identity(req);
     const fullAccess = canManage(profile);
+    const resultsAccess = canViewOrganizerResults(profile);
     const revealPoints = requestHasPointAccess(req, profile.id);
     const scoringConfiguration = await loadScoringConfiguration(client);
     const { data: allCompetitors, error } = await client
@@ -35,29 +36,6 @@ export async function GET(req: Request) {
         scoringConfiguration.rules,
       ),
     );
-    const own = submissions.filter(
-      (s) =>
-        s.user_id === profile.id &&
-        s.finished &&
-        !allCompetitors!.find((c) => c.id === s.competitor_id)?.archived,
-    );
-    const personal = own.map((s) => ({
-      competitor_id: s.competitor_id,
-      rank: 1,
-      ...(revealPoints ? { total: total(s, scoringConfiguration.rules) } : {}),
-    }));
-    for (const division of new Set(allCompetitors!.map((c) => c.division))) {
-      const sorted = own
-        .filter(
-          (s) =>
-            allCompetitors!.find((c) => c.id === s.competitor_id)?.division ===
-            division,
-        )
-        .sort((a, b) => Number(a.dq) - Number(b.dq) || total(b, scoringConfiguration.rules) - total(a, scoringConfiguration.rules));
-      sorted.forEach((s, i) => {
-        personal.find((p) => p.competitor_id === s.competitor_id)!.rank = i + 1;
-      });
-    }
     const divisionRows = await client.from("divisions").select("name");
     const ownProfile = await withAvatar(client, profile);
     let assignmentsQuery = client.from("division_judges").select("division,slot,user_id,scoring_type");
@@ -108,7 +86,6 @@ export async function GET(req: Request) {
       pointAccess: revealPoints,
       ...(revealPoints ? { scoringRules: scoringConfiguration.rules } : {}),
       scoringConfigRevision: scoringConfiguration.revision,
-      personal,
       submissions,
       assignments,
       scoringWindow,
@@ -136,9 +113,10 @@ export async function GET(req: Request) {
               : row,
           );
     }
+    if (resultsAccess && revealPoints) {
+      result.rankings = rankGlobal(allCompetitors!, submissions, scoringConfiguration.rules, assignments, judgeRoster);
+    }
     if (fullAccess) {
-      if (revealPoints)
-        result.rankings = rankGlobal(allCompetitors!, submissions, scoringConfiguration.rules, assignments, judgeRoster);
       result.judgeRoster = judgeRoster;
       result.competitors = allCompetitors;
       let roster: any = await client

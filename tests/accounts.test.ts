@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PasswordField } from "../app/components/password-field";
 import { usernameSchema, internalAddress } from "../lib/usernames";
-import { canManage, isAssignedJudge, profileCanScoreType, scoringTabs } from "../lib/access";
+import { canManage, canViewOrganizerResults, isAssignedJudge, profileCanScoreType, scoringTabs } from "../lib/access";
 import type { Profile } from "../lib/model";
 
 test("usernames normalize and reject email identifiers or unsafe characters", () => {
@@ -45,6 +45,12 @@ test("admin permission follows the account in every build mode", () => {
   assert.equal(canManage({ ...judge, is_admin: true }), true);
   assert.equal(canManage({ ...judge, role: "organizer" }), true);
   assert.equal(canManage({ ...judge, role: "performance_judge" }), false);
+  assert.equal(canViewOrganizerResults({ ...judge, username: "alexandertai", role: "organizer" }), true);
+  assert.equal(canViewOrganizerResults({ ...judge, username: " ORGANIZER ", role: "organizer" }), true);
+  assert.equal(canViewOrganizerResults({ ...judge, username: "other-organizer", role: "organizer" }), false);
+  assert.equal(canViewOrganizerResults({ ...judge, username: "organizer", role: "technical_judge", is_admin: false }), false);
+  assert.equal(canViewOrganizerResults({ ...judge, username: "organizer", role: "technical_judge", is_admin: true }), false);
+  assert.equal(canViewOrganizerResults({ ...judge, username: "alexandertai", role: "organizer", active: false }), false);
   assert.equal(isAssignedJudge({ ...judge, role: "organizer" }), true);
   assert.equal(profileCanScoreType({ ...judge, role: "technical_judge" }, "technical"), true);
   assert.equal(profileCanScoreType({ ...judge, role: "technical_judge" }, "performance"), false);

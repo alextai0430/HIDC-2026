@@ -33,6 +33,7 @@ import {
   canManage,
   isAssignedJudge,
   canManageScoringConfiguration,
+  canViewOrganizerResults,
   profileCanScoreType,
   scoringTabs,
 } from "@/lib/access";
@@ -382,6 +383,7 @@ export default function Page() {
   const state = workspace?.snapshot;
   const profile = state?.profile;
   const server = !!profile && canManage(profile);
+  const resultsAuthorized = !!profile && canViewOrganizerResults(profile);
   const canManageScoringConfig = !!profile && canManageScoringConfiguration(profile);
   const organizer = profile?.role === "organizer" || profile?.role === "server_admin";
   const canViewPoints =
@@ -395,8 +397,6 @@ export default function Page() {
         submission.scoring_type === "performance" &&
         submission.user_id === profile.id)
     );
-  const canViewPersonalPoints = (competitorId: string) =>
-    canViewPoints && !!state?.submissions.some((submission) => submission.competitor_id === competitorId);
   const active = state?.competitors.find(
     (c) => c.status === "active" && !c.archived,
   );
@@ -987,6 +987,10 @@ export default function Page() {
       setAdminPasswordError("Admin access expired. Enter the Admin password again.");
     }
   }, [adminUnlocked, showPoints, state?.pointAccess]);
+  useEffect(() => {
+    if (!profile || resultsAuthorized || (tab !== "Rankings" && tab !== "Score Details")) return;
+    setTab(defaultScoreTab(state!));
+  }, [profile?.id, profile?.username, profile?.role, profile?.active, resultsAuthorized, tab, state]);
   useEffect(() => {
     if (!ready || !state) return;
     const revalidate = () => {
@@ -1768,30 +1772,6 @@ export default function Page() {
     setTab(defaultScoreTab(local?.snapshot ?? snapshot));
     clear();
   }
-  const exportPersonal = (format: "csv" | "txt", ranked: boolean) => {
-    const rows = (state?.personal ?? [])
-      .map((r) => {
-        const c = state!.competitors.find((c) => c.id === r.competitor_id)!;
-        return {
-      Rank: r.rank,
-          Competitor: c.name,
-          Division: c.division,
-          Order: c.position,
-          Submitted:
-            state!.submissions.find(
-              (s) => s.competitor_id === c.id && s.user_id === profile?.id,
-            )?.submitted_at ?? "",
-          ...(technical ? {} : { Score: canViewPersonalPoints(r.competitor_id) ? r.total : "***" }),
-        };
-      })
-      .filter((r) => filter === "All divisions" || r.Division === filter)
-      .sort((a, b) =>
-        ranked
-          ? a.Division.localeCompare(b.Division) || a.Rank - b.Rank
-          : a.Submitted.localeCompare(b.Submitted),
-      );
-    download(rows, format, ranked ? "personal-ranked" : "personal-order");
-  };
   const exports = (handler: (f: "csv" | "txt", ranked: boolean) => void) => (
     <div className="exports">
       {(["csv", "txt"] as const).flatMap((f) =>
@@ -1866,9 +1846,9 @@ export default function Page() {
   const nav = [
     ...(server ? ["Server Access Control"] : []),
     ...(profile ? scoringTabs(profile) : []),
-    "Score Details",
+    ...(resultsAuthorized ? ["Score Details"] : []),
     "Saved Competitors",
-    "Rankings",
+    ...(resultsAuthorized ? ["Rankings"] : []),
     "Admin",
   ];
   return (
@@ -2764,7 +2744,7 @@ export default function Page() {
             </div>
           </section>
         )}
-        {tab === "Rankings" && (server ? (
+        {tab === "Rankings" && resultsAuthorized && server && (
           <section className="panel records results-panel">
             <div className="results-heading">
               <div>
@@ -2863,29 +2843,8 @@ export default function Page() {
               <div className="empty-state results-empty"><Trophy /><h3>No ranked divisions yet</h3><p>Create a non-exhibition division and add competitors to see results here.</p></div>
             )}
           </section>
-        ) : (
-          <section className="panel records">
-            <div className="panel-heading">
-              <h3><Trophy size={17} /> Your Personal Rankings</h3>
-              <select value={filter} onChange={(event) => setFilter(event.target.value)}>
-                <option value="All divisions">All divisions</option>
-                {allDivisions.map((division) => <option key={division} value={division}>{division}</option>)}
-              </select>
-            </div>
-            {exports(exportPersonal)}
-            <table>
-              <thead><tr><th>Rank</th><th>Competitor</th><th>Division</th>{!technical && <th>Your score</th>}</tr></thead>
-              <tbody>
-                {(state.personal ?? []).filter((row) => filter.toLowerCase() === "all divisions" || state.competitors.find((competitor) => competitor.id === row.competitor_id)?.division === filter).map((row) => {
-                  const competitor = state.competitors.find((candidate) => candidate.id === row.competitor_id)!;
-                  return <tr key={row.competitor_id}><td>#{row.rank}</td><td>{competitor.name}</td><td>{competitor.division}</td>{!technical && <td>{canViewPersonalPoints(row.competitor_id) ? fmt(row.total) : "***"}</td>}</tr>;
-                })}
-              </tbody>
-            </table>
-            {!state.personal?.length && <div className="empty-state"><Trophy /><h3>No Submitted Rankings Yet</h3><p>Finish and sync a submission to see your personal results.</p></div>}
-          </section>
-        ))}
-        {tab === "Score Details" && (
+        )}
+        {tab === "Score Details" && resultsAuthorized && server && (
           <section className="panel records score-details-panel">
             <div className="results-heading details-heading">
               <div>

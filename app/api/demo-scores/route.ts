@@ -1,13 +1,13 @@
 import { eventScore, rankGlobal, total } from "@/lib/scoring";
 import { Snapshot } from "@/lib/model";
-import { canManage } from "@/lib/access";
+import { canViewOrganizerResults } from "@/lib/access";
 import { DEFAULT_SCORING_RULES } from "@/lib/scoring-config";
 export async function POST(req: Request) {
   if (process.env.NEXT_PUBLIC_BYPASS_AUTH !== "true")
     return Response.json({ error: "Demo scoring disabled" }, { status: 403 });
   try {
     const snapshot = (await req.json()) as Snapshot;
-    const fullAccess = canManage(snapshot.profile);
+    const fullAccess = canViewOrganizerResults(snapshot.profile);
     const submissions = fullAccess
       ? snapshot.submissions
       : snapshot.submissions.filter((s) => s.user_id === snapshot.profile.id);

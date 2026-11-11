@@ -754,7 +754,7 @@ test("state endpoint masks score data until unlock and only returns own judge po
       }
       assert.equal(submission.events[0].value, undefined, "technical event points remain masked");
     }
-    assert.ok(hiddenBody.personal.every((entry: any) => entry.total === undefined));
+    assert.equal(hiddenBody.personal, undefined, "judge ranking summaries are never returned by the state API");
     if (access.isAdministrator(p)) {
       assert.equal(hiddenBody.protected, true);
       assert.equal(hiddenBody.submissions.length, 5);
@@ -822,8 +822,12 @@ test("state endpoint masks score data until unlock and only returns own judge po
     if (access.isAdministrator(p)) {
       assert.equal(visibleBody.submissions.length, 5);
       assert.equal(visibleBody.submissions[0].total, 9);
-      assert.equal(visibleBody.rankings.length, 2);
-      assert.equal(visibleBody.rankings[0].technical[0], 9);
+      if (access.canViewOrganizerResults(p)) {
+        assert.equal(visibleBody.rankings.length, 2);
+        assert.equal(visibleBody.rankings[0].technical[0], 9);
+      } else {
+        assert.equal(visibleBody.rankings, undefined, "other administrator accounts cannot fetch organizer-only rankings");
+      }
       assert.equal(visibleBody.audit.length, 1);
     } else {
       assert.equal(visibleBody.submissions.length, 1);
@@ -831,6 +835,7 @@ test("state endpoint masks score data until unlock and only returns own judge po
       assert.equal(visibleBody.submissions[0].total, p.role === "technical_judge" ? 9 : 30);
       assert.equal(visibleBody.submissions[0].events[0].value, 9);
       assert.equal(visibleBody.rankings, undefined);
+      assert.equal(visibleBody.personal, undefined);
       assert.equal(visibleBody.audit, undefined);
     }
   }
