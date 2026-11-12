@@ -1,6 +1,7 @@
 @import "tailwindcss";
 :root {
   --header-height: 88px;
+  --navigation-height: 59px;
   --app-font: Arial, Helvetica, sans-serif;
   --bg: #f0f4f7;
   --panel: #fff;
@@ -237,7 +238,7 @@ nav {
   padding: 0 36px;
   gap: 22px;
   border-bottom: 1px solid var(--border);
-  height: 59px;
+  height: var(--navigation-height);
   background: var(--panel);
 }
 nav button {
@@ -268,20 +269,28 @@ nav button:hover:not(:disabled) {
 }
 .admin-session-bar {
   position: sticky;
-  top: calc(var(--header-height) + 59px);
+  top: calc(var(--header-height) + var(--navigation-height));
   z-index: 39;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
+  width: min(100%, 1500px);
   min-height: 42px;
   padding: 6px 36px;
+  margin: 0 auto;
   border-bottom: 1px solid var(--border);
   background: var(--panel2);
   color: var(--muted);
   font-size: 11px;
 }
+.admin-session-bar > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .admin-session-bar .admin-points-toggle {
+  flex: 0 0 auto;
   min-width: 100px;
   padding: 6px 10px;
   font-size: 11px;
@@ -1622,6 +1631,7 @@ select {
 @media (max-width: 800px) {
   :root {
     --header-height: 73px;
+    --navigation-height: 54px;
   }
   header {
     height: 73px;
@@ -1648,9 +1658,9 @@ select {
     overflow-x: auto;
     padding: 0 16px;
     gap: 20px;
-    height: 54px;
+    height: var(--navigation-height);
   }
-  .admin-session-bar { top: calc(var(--header-height) + 54px); padding: 6px 16px; }
+  .admin-session-bar { padding: 6px 16px; }
   nav button {
     font-size: 12px;
   }
@@ -1850,12 +1860,13 @@ select {
 @media (min-width: 801px) and (max-height: 900px) {
   :root {
     --header-height: 64px;
+    --navigation-height: 48px;
   }
   header {
     height: 64px;
   }
   nav {
-    height: 48px;
+    height: var(--navigation-height);
   }
   .workspace {
     padding-top: 18px;
@@ -2914,6 +2925,7 @@ select {
 .app-shell[data-template="focus-mode"] .deduction-buttons button { min-height: 47px; font-size: 14px; }
 .app-shell[data-template="focus-mode"] .competitor-strip { border-width: 2px; }
 .app-shell[data-template="sidebar-workspace"] nav { position: fixed; z-index: 45; top: var(--header-height); bottom: 0; left: 0; width: 210px; height: auto; overflow-y: auto; flex-direction: column; align-items: stretch; gap: 3px; padding: 17px 12px; border-right: 1px solid var(--border); border-bottom: 0; background: var(--panel); }
+.app-shell[data-template="sidebar-workspace"] .admin-session-bar { top: var(--header-height); width: auto; max-width: none; margin-left: 210px; margin-right: 0; padding: 6px 16px; }
 .app-shell[data-template="sidebar-workspace"] nav button { min-height: 39px; justify-content: flex-start; gap: 10px; padding: 0 9px; border-radius: 5px; }
 .app-shell[data-template="sidebar-workspace"] nav button.active { background: var(--teal-bg); }
 .app-shell[data-template="sidebar-workspace"] nav button.active:after { top: 5px; bottom: 5px; left: 0; right: auto; width: 3px; height: auto; border-radius: 3px; }
@@ -2924,6 +2936,7 @@ select {
 .app-shell[data-template="sidebar-workspace"] .alert,
 .app-shell[data-template="sidebar-workspace"] .point-sync-reconciliation { margin-left: 210px; }
 .app-shell[data-template="sidebar-workspace"][data-sidebar-collapsed="true"] nav { display: none; }
+.app-shell[data-template="sidebar-workspace"][data-sidebar-collapsed="true"] .admin-session-bar { margin-left: 0; }
 .app-shell[data-template="sidebar-workspace"][data-sidebar-collapsed="true"] .workspace { margin-left: 0; }
 .app-shell[data-template="sidebar-workspace"][data-sidebar-collapsed="true"] footer,
 .app-shell[data-template="sidebar-workspace"][data-sidebar-collapsed="true"] .demo-bar,
