@@ -121,7 +121,7 @@ const defaultKeys: Record<string, string> = {
   "Time Violation": "v",
   "Other Rule Violation": "b",
 };
-const fmt = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
+const fmt = (v: number | null | undefined) => (v == null ? "—" : String(Number(v.toFixed(3))));
 const uid = () => crypto.randomUUID();
 const executionControlLabels: Record<(typeof executionOptions)[number], string> = {
   E0: "E0",

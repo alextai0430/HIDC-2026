@@ -91,7 +91,7 @@ export function resultsViewLabel(view: ResultsView, judges: ResultsJudge[]) {
 /** Export data mirrors the visible ranking table and deliberately omits judge identities. */
 export function rankingResultsExportRows(rows: ResultsRow[], judges: ResultsJudge[], view: ResultsView, revealPoints: boolean): Record<string, unknown>[] {
   if (!revealPoints) return [];
-  const rounded = (value: number | null) => value == null ? null : Number(value.toFixed(2));
+  const rounded = (value: number | null) => value == null ? null : Number(value.toFixed(3));
   return rows.map((row) => ({
     Rank: row.viewRank ?? "Pending",
     Competitor: row.competitor.name,
@@ -117,7 +117,7 @@ export function rankingResultsExportText(rows: ResultsRow[], judges: ResultsJudg
   const headers = Object.keys(records[0]);
   const textCell = (value: unknown) => {
     if (value == null) return "Pending";
-    if (typeof value === "number" && Number.isFinite(value)) return String(Number(value.toFixed(2)));
+    if (typeof value === "number" && Number.isFinite(value)) return String(Number(value.toFixed(3)));
     return String(value).replaceAll("|", "/").replace(/[\r\n]+/g, " ");
   };
   const tableRows = [
@@ -175,7 +175,7 @@ export function scoreDetailsExportContent(
   const row = (values: unknown[]) => values.map(cell).join(",");
   const pipeRow = (values: unknown[]) => values.map((value) => String(value ?? "").replaceAll("|", "/").replace(/[\r\n]+/g, " ")).join(" | ");
   const point = (value: number | null | undefined) => revealPoints
-    ? value == null ? "" : Number(value.toFixed(2))
+    ? value == null ? "" : Number(value.toFixed(3))
     : "***";
   const submittedAt = (value?: string | null) => {
     if (!value) return "";

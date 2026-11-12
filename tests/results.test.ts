@@ -137,11 +137,11 @@ test("ranking exports follow the selected division/view and never include judge 
   }, precisionJudges);
   const textExport = rankingResultsExportText(rankDivisionView([noisyPrecision], "Open", "overall"), precisionRoster, "overall", true);
   const csvRows = rankingResultsExportRows(rankDivisionView([noisyPrecision], "Open", "overall"), precisionRoster, "overall", true);
-  assert.equal(csvRows[0]["Weighted Final /100"], 95.17);
+  assert.equal(csvRows[0]["Weighted Final /100"], 95.167);
   assert.equal(csvRows[0]["Average Technical raw"], 37.4);
   assert.equal(csvRows[0]["Technical · Judge 2"], 36);
   assert.match(textExport, /Rank\s+\|\s+Competitor/);
-  assert.match(textExport, /95\.17/);
+  assert.ok(textExport.includes("95.167"));
   assert.match(textExport, /37\.4/);
   assert.match(textExport, /36(?=\s*\|)/);
   assert.doesNotMatch(textExport, /36\.00000000000001|37\.400000000000006|95\.16666666666667/);
@@ -234,6 +234,31 @@ test("competitor details keep every assigned judge together and preserve event/c
     }],
   }], true);
   assert.ok(roundedTotal.includes("Technical Total: 36"));
+  const executionPrecision = scoreDetailsExportContent([{
+    competitor: target,
+    judgeRows: [{
+      ...grouped[0],
+      submission: {
+        ...technical,
+        events: [{ ...technical.events[0], value: 1.23456 }],
+        total: 1.23456,
+      },
+    }],
+  }], true);
+  assert.ok(executionPrecision.includes("1, #3DL2E-2: 1.235"));
+  assert.ok(executionPrecision.includes("Technical Total: 1.235"));
+  const executionPrecisionText = scoreDetailsExportContent([{
+    competitor: target,
+    judgeRows: [{
+      ...grouped[0],
+      submission: {
+        ...technical,
+        events: [{ ...technical.events[0], value: 1.23456 }],
+        total: 1.23456,
+      },
+    }],
+  }], true, "txt");
+  assert.ok(executionPrecisionText.includes("1 | #3DL2E-2 | 1.235"));
 
   const second = competitor("2", "Open", 8);
   const multi = scoreDetailsExportContent([
