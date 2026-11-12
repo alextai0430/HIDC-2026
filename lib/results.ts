@@ -1,4 +1,4 @@
-import { categories, deductions, executionLabels, type Competitor, type Event, type Ranking, type Submission } from "./model";
+import { categories, deductions, type Competitor, type Event, type Ranking, type ScoringRules, type Submission } from "./model";
 
 export type ScoringType = "technical" | "performance";
 export type ResultsJudge = {
@@ -126,51 +126,78 @@ export function compactTechnicalNotation(event: Event) {
   return `${dimension ?? event.trick}${category ?? ""}L${event.level}${event.execution ?? "E0"}`;
 }
 
-/** Emits a row per technical event or Performance category, preserving event order and masking values. */
-export function scoreDetailsExportRows(
-  competitor: Competitor,
-  judgeRows: ScoreDetailsJudgeRow[],
+export type ScoreDetailsExportSection = {
+  competitor: Competitor;
+  judgeRows: ScoreDetailsJudgeRow[];
+};
+
+/** Builds consistent CSV-style sections for one or many competitors and judges. */
+export function scoreDetailsExportContent(
+  sections: ScoreDetailsExportSection[],
   revealPoints: boolean,
+  rules?: ScoringRules,
 ) {
-  const rows: Record<string, unknown>[] = [];
+  const lines: string[] = [];
+  const separator = "==================================================";
+  const cell = (value: unknown) => {
+    const numeric = typeof value === "number" && Number.isFinite(value);
+    let text = value == null ? "" : String(value);
+    if (!numeric && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+    return `"${text.replaceAll('"', '""')}"`;
+  };
+  const row = (values: unknown[]) => values.map(cell).join(",");
   const point = (value: number | null | undefined) => revealPoints ? value ?? "—" : "***";
-  for (const { judge, submission } of judgeRows) {
-    const base = {
-      Competitor: competitor.name,
-      Judge: `Judge ${judge.roster_order}`,
-      Scoring: judge.scoring_type === "technical" ? "Technical" : "Performance",
-      Status: submission ? (submission.finished ? "Submitted" : "Draft") : "Not submitted",
-      DQ: submission?.dq ?? false,
-      Updated: submission?.updated_at ?? "—",
-      Submitted: submission?.submitted_at ?? "—",
-    };
-    if (!submission) {
-      rows.push({ ...base, Event: "—", Details: "—", Value: "—", "Raw total": "—" });
-    } else if (judge.scoring_type === "technical") {
-      if (!submission.events.length) rows.push({ ...base, Event: "—", Details: "No technical events", Value: "—", "Raw total": point(submission.total) });
-      submission.events.forEach((event, index) => rows.push({
-        ...base,
-        Event: index + 1,
-        Details: deductions.includes(event.trick)
-          ? `Deduction · ${event.trick}`
-          : `${event.trick} · L${event.level} · ${event.features.join(" + ") || "No features"} · ${executionLabels[event.execution ?? "E0"]} · ${compactTechnicalNotation(event)}`,
-        Category: deductions.includes(event.trick) ? "Deduction" : event.trick.split(" ")[0],
-        Level: deductions.includes(event.trick) ? "—" : event.level,
-        Features: deductions.includes(event.trick) ? "—" : event.features.join(" + ") || "No features",
-        Execution: deductions.includes(event.trick) ? "—" : executionLabels[event.execution ?? "E0"],
-        Timestamp: event.at,
-        Value: point(event.value),
-        "Raw total": point(submission.total),
-      }));
-    } else {
-      categories.forEach((category, index) => rows.push({
-        ...base,
-        Event: index + 1,
-        Category: category,
-        Value: point(submission.performance[index]),
-        "Raw total": point(submission.total),
-      }));
-    }
-  }
-  return rows;
+  const submittedAt = (value?: string | null) => {
+    if (!value) return "—";
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? value : new Date(parsed).toISOString();
+  };
+
+  sections.forEach(({ competitor, judgeRows }, sectionIndex) => {
+    if (sectionIndex > 0 && lines.at(-1) !== separator) lines.push(separator);
+    judgeRows.forEach(({ judge, submission }) => {
+      const scoringLabel = judge.scoring_type === "technical" ? "Technical" : "Performance";
+      lines.push(row(["Competitor", competitor.name]));
+      lines.push(row(["Judge", `Judge ${judge.roster_order}`]));
+      lines.push(row(["Judge Category", scoringLabel]));
+      lines.push(row(["Submitted At", submittedAt(submission?.submitted_at)]));
+
+      if (judge.scoring_type === "technical") {
+        lines.push("TECHNICAL SCORES");
+        lines.push(row(["#", "Identifier", "Trick", "Difficulty", "Base", "Features", "Execution", "Level", "Final"]));
+        const events = submission?.events ?? [];
+        events.forEach((event, index) => {
+          const isDeduction = deductions.includes(event.trick);
+          const [trickType, difficulty] = event.trick.split(" ");
+          const baseValue = isDeduction
+            ? rules?.deductions[event.trick] ?? event.value
+            : rules?.bases[trickType]?.[difficulty];
+          lines.push(row([
+            index + 1,
+            compactTechnicalNotation(event),
+            isDeduction ? event.trick : trickType,
+            isDeduction ? "—" : difficulty ?? "—",
+            point(baseValue),
+            isDeduction ? "—" : event.features.length ? event.features.join(", ") : "—",
+            isDeduction ? "—" : event.execution ?? "E0",
+            isDeduction ? "—" : `L${event.level}`,
+            point(event.value),
+          ]));
+        });
+        const calculatedTotal = submission?.total ?? submission?.events.reduce((sum, event) => sum + (event.value ?? 0), 0);
+        lines.push(row(["Technical Total", "", "", "", "", "", "", "", submission ? point(calculatedTotal) : "—"]));
+      } else {
+        lines.push("PERFORMANCE SCORES");
+        lines.push(row(["Category", "Score"]));
+        categories.forEach((category, index) => lines.push(row([
+          category,
+          submission ? point(submission.performance[index]) : "—",
+        ])));
+        const calculatedTotal = submission?.total ?? submission?.performance.reduce((sum, value) => sum + value, 0);
+        lines.push(row(["Performance Total", submission ? point(calculatedTotal) : "—"]));
+      }
+      lines.push(separator);
+    });
+  });
+  return lines.join("\r\n");
 }

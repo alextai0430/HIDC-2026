@@ -1,23 +1,29 @@
 export function download(
-  rows: Record<string, unknown>[],
+  rowsOrContent: Record<string, unknown>[] | string,
   format: "csv" | "txt",
   name: string,
 ) {
-  if (!rows.length) return;
-  const keys = Object.keys(rows[0]);
-  const safe = (v: unknown) => {
-    const s = v == null ? "Pending" : String(v);
-    return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
-  };
-  const sep = format === "csv" ? "," : "\t";
-  const cell = (v: unknown) =>
-    format === "csv"
-      ? `"${safe(v).replaceAll('"', '""')}"`
-      : safe(v).replaceAll("\t", " ").replaceAll("\n", " ");
-  const content = [
-    keys.map(cell).join(sep),
-    ...rows.map((r) => keys.map((k) => cell(r[k])).join(sep)),
-  ].join("\r\n");
+  let content: string;
+  if (typeof rowsOrContent === "string") {
+    content = rowsOrContent;
+  } else {
+    if (!rowsOrContent.length) return;
+    const keys = Object.keys(rowsOrContent[0]);
+    const safe = (v: unknown) => {
+      const s = v == null ? "Pending" : String(v);
+      return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+    };
+    const sep = format === "csv" ? "," : "\t";
+    const cell = (v: unknown) =>
+      format === "csv"
+        ? `"${safe(v).replaceAll('"', '""')}"`
+        : safe(v).replaceAll("\t", " ").replaceAll("\n", " ");
+    content = [
+      keys.map(cell).join(sep),
+      ...rowsOrContent.map((r) => keys.map((k) => cell(r[k])).join(sep)),
+    ].join("\r\n");
+  }
+  if (!content) return;
   const url = URL.createObjectURL(
     new Blob(["\ufeff" + content], {
       type:

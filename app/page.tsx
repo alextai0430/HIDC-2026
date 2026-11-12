@@ -73,7 +73,7 @@ import {
   rankingResultsExportRows,
   resultsViewLabel,
   scoreDetailsForCompetitor,
-  scoreDetailsExportRows,
+  scoreDetailsExportContent,
   scoreForAssignedJudge,
   type ResultsView,
 } from "@/lib/results";
@@ -509,6 +509,21 @@ export default function Page() {
   const competitorDetailRows = detailsCompetitor
     ? scoreDetailsForCompetitor(detailsCompetitor.id, detailRoster, visibleSubmissions)
     : [];
+  const exportScoreDetails = (
+    competitorsToExport: Competitor[],
+    format: "csv" | "txt",
+    name: string,
+  ) => {
+    const sections = competitorsToExport.map((competitor) => ({
+      competitor,
+      judgeRows: scoreDetailsForCompetitor(
+        competitor.id,
+        divisionResultsJudges(competitor.division, state?.judgeRoster, state?.assignments, [competitor]),
+        visibleSubmissions,
+      ),
+    }));
+    download(scoreDetailsExportContent(sections, canViewPoints, state?.scoringRules), format, name);
+  };
   const syncStatus = demo
     ? "Score saved locally · demo"
     : syncError && workspace?.queue.length
@@ -2871,15 +2886,22 @@ export default function Page() {
               </div>
             </div>
             {canViewPoints && detailsCompetitor && <div className="exports results-exports">
-              {(["csv", "txt"] as const).map((format) => (
-                <button key={format} onClick={() => download(
-                  scoreDetailsExportRows(detailsCompetitor, competitorDetailRows, canViewPoints),
+              {(["csv", "txt"] as const).flatMap((format) => [
+                <button key={`selected-${format}`} onClick={() => exportScoreDetails(
+                  [detailsCompetitor],
                   format,
                   `score-details-${detailsCompetitor.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
                 )}>
-                  <Download size={14} /> Export {format.toUpperCase()}
-                </button>
-              ))}
+                  <Download size={14} /> Export Competitor {format.toUpperCase()}
+                </button>,
+                <button key={`division-${format}`} onClick={() => exportScoreDetails(
+                  detailsCompetitors,
+                  format,
+                  `score-details-${detailsDivision.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+                )}>
+                  <Download size={14} /> Export Division {format.toUpperCase()}
+                </button>,
+              ])}
             </div>}
             {!canViewPoints && <p className="masked-points-note" role="status">Score values and exports are hidden until Admin is unlocked and Show Points is on.</p>}
             {detailsCompetitor ? (
