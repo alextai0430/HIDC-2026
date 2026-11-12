@@ -71,6 +71,7 @@ import {
   divisionResultsJudges,
   rankDivisionView,
   rankingResultsExportRows,
+  rankingResultsExportText,
   resultsViewLabel,
   scoreDetailsForCompetitor,
   scoreDetailsExportContent,
@@ -522,7 +523,7 @@ export default function Page() {
         visibleSubmissions,
       ),
     }));
-    download(scoreDetailsExportContent(sections, canViewPoints), format, name);
+    download(scoreDetailsExportContent(sections, canViewPoints, format), format, name);
   };
   const syncStatus = demo
     ? "Score saved locally · demo"
@@ -2799,7 +2800,9 @@ export default function Page() {
               <div className="exports results-exports">
                 {(["csv", "txt"] as const).map((format) => (
                   <button key={format} onClick={() => download(
-                    rankingResultsExportRows(divisionResults, resultsJudges, resultsView, canViewPoints),
+                    format === "txt"
+                      ? rankingResultsExportText(divisionResults, resultsJudges, resultsView, canViewPoints)
+                      : rankingResultsExportRows(divisionResults, resultsJudges, resultsView, canViewPoints),
                     format,
                     `rankings-${resultsDivision.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${resultsView.split(":")[0]}`,
                   )}>

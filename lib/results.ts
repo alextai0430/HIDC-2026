@@ -1,4 +1,4 @@
-import { categories, deductions, type Competitor, type Event, type Ranking, type ScoringRules, type Submission } from "./model";
+import { categories, deductions, type Competitor, type Event, type Ranking, type Submission } from "./model";
 
 export type ScoringType = "technical" | "performance";
 export type ResultsJudge = {
@@ -108,6 +108,31 @@ export function rankingResultsExportRows(rows: ResultsRow[], judges: ResultsJudg
   }));
 }
 
+/** Readable pipe table for the TXT rankings export; calculations remain untouched. */
+export function rankingResultsExportText(rows: ResultsRow[], judges: ResultsJudge[], view: ResultsView, revealPoints: boolean) {
+  const records = rankingResultsExportRows(rows, judges, view, revealPoints);
+  if (!records.length) return "";
+
+  const headers = Object.keys(records[0]);
+  const textCell = (value: unknown) => {
+    if (value == null) return "Pending";
+    if (typeof value === "number" && Number.isFinite(value)) return String(Number(value.toFixed(2)));
+    return String(value).replaceAll("|", "/").replace(/[\r\n]+/g, " ");
+  };
+  const tableRows = [
+    headers,
+    ...records.map((record) => headers.map((header) => textCell(record[header]))),
+  ];
+  const widths = headers.map((header, index) => Math.max(
+    header.length,
+    ...tableRows.slice(1).map((row) => row[index].length),
+  ));
+  const render = (row: string[]) => row.map((cell, index) => ` ${cell.padEnd(widths[index])} `).join("|");
+  const rule = widths.map((width) => "-".repeat(width + 2)).join("+");
+
+  return [render(tableRows[0]), rule, ...tableRows.slice(1).map(render)].join("\r\n");
+}
+
 export function scoreDetailsForCompetitor(
   competitorId: string,
   judges: ResultsJudge[],
@@ -135,9 +160,10 @@ export type ScoreDetailsExportSection = {
 export function scoreDetailsExportContent(
   sections: ScoreDetailsExportSection[],
   revealPoints: boolean,
+  format: "csv" | "txt" = "csv",
 ) {
   const lines: string[] = [];
-  const separator = "==================================================";
+  const separator = format === "txt" ? "--------------------------------------------------" : "==================================================";
   const cell = (value: unknown) => {
     const numeric = typeof value === "number" && Number.isFinite(value);
     let text = value == null ? "" : String(value);
@@ -146,6 +172,7 @@ export function scoreDetailsExportContent(
     return text;
   };
   const row = (values: unknown[]) => values.map(cell).join(",");
+  const pipeRow = (values: unknown[]) => values.map((value) => String(value ?? "").replaceAll("|", "/").replace(/[\r\n]+/g, " ")).join(" | ");
   const point = (value: number | null | undefined) => revealPoints
     ? value == null ? "" : Number(value.toFixed(2))
     : "***";
@@ -159,32 +186,45 @@ export function scoreDetailsExportContent(
     if (sectionIndex > 0 && lines.at(-1) !== separator) lines.push(separator);
     judgeRows.forEach(({ judge, submission }) => {
       const scoringLabel = judge.scoring_type === "technical" ? "Technical" : "Performance";
-      lines.push(`Competitor: ${cell(competitor.name)}`);
-      lines.push(`Judge: ${cell(`Judge ${judge.roster_order}`)}`);
-      lines.push(`Judge Category: ${scoringLabel}`);
-      lines.push(`Submitted At: ${submittedAt(submission?.submitted_at)}`);
+      const metadataRow = (label: string, value: string) => lines.push(
+        format === "txt" ? pipeRow([label, value]) : `${label}: ${cell(value)}`,
+      );
+      metadataRow("Competitor", competitor.name);
+      metadataRow("Judge", `Judge ${judge.roster_order}`);
+      metadataRow("Judge Category", scoringLabel);
+      metadataRow("Submitted At", submittedAt(submission?.submitted_at));
 
       if (judge.scoring_type === "technical") {
         lines.push("TECHNICAL SCORES");
         const events = submission?.events ?? [];
+        if (format === "txt") lines.push(pipeRow(["#", "Trick / deduction", "Final"]));
         events.forEach((event, index) => {
           const isDeduction = deductions.includes(event.trick);
           const [trickType, difficulty] = event.trick.split(" ");
           const label = isDeduction
-            ? `${event.trick}: ${point(event.value)}`
+            ? event.trick
             : `${trickType}${difficulty ?? ""}L${event.level}${event.execution ?? "E0"}` +
-              `${event.features.length ? ` [${event.features.join(" + ")}]` : ""}: ${point(event.value)}`;
-          lines.push(row([index + 1, ` ${label}`]));
+              `${event.features.length ? ` [${event.features.join(" + ")}]` : ""}`;
+          lines.push(format === "txt"
+            ? pipeRow([index + 1, label, point(event.value)])
+            : row([index + 1, ` ${label}: ${point(event.value)}`]));
         });
         const calculatedTotal = submission?.total ?? submission?.events.reduce((sum, event) => sum + (event.value ?? 0), 0);
-        lines.push(`Technical Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
+        lines.push(format === "txt"
+          ? pipeRow(["Technical Total", submission ? point(calculatedTotal) : "Not submitted"])
+          : `Technical Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
       } else {
         lines.push("PERFORMANCE SCORES");
+        if (format === "txt") lines.push(pipeRow(["Category", "Score"]));
         categories.forEach((category, index) => lines.push(
-          `${category}: ${submission ? point(submission.performance[index]) : ""}`,
+          format === "txt"
+            ? pipeRow([category, submission ? point(submission.performance[index]) : ""])
+            : `${category}: ${submission ? point(submission.performance[index]) : ""}`,
         ));
         const calculatedTotal = submission?.total ?? submission?.performance.reduce((sum, value) => sum + value, 0);
-        lines.push(`Performance Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
+        lines.push(format === "txt"
+          ? pipeRow(["Performance Total", submission ? point(calculatedTotal) : "Not submitted"])
+          : `Performance Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
       }
       lines.push(separator);
     });

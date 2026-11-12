@@ -6,6 +6,7 @@ import {
   divisionResultsJudges,
   rankDivisionView,
   rankingResultsExportRows,
+  rankingResultsExportText,
   scoreDetailsExportContent,
   scoreDetailsForCompetitor,
   scoreForAssignedJudge,
@@ -117,6 +118,30 @@ test("ranking exports follow the selected division/view and never include judge 
   assert.equal(exported[0]["Weighted Final /100"], 88);
   assert.doesNotMatch(JSON.stringify(exported), /Secret .* Name|tech-1|perf-2/);
   assert.deepEqual(rankingResultsExportRows(visible, roster, "performance", false), []);
+
+  const precisionJudges: NonNullable<Ranking["judges"]> = [
+    ...judges,
+    { user_id: "tech-2", scoring_type: "technical", roster_order: 2, display_name: "Secret Technical Name 2" },
+  ];
+  const precisionRoster: ResultsJudge[] = [
+    ...roster,
+    { user_id: "tech-2", scoring_type: "technical", roster_order: 2 },
+  ];
+  const noisyPrecision = ranking("2", "Open", 2, {
+    technical: [38.8, 36.00000000000001],
+    performance: [23.5, 25.5],
+    raw: 37.400000000000006,
+    scaled: 70,
+    average: 24.5,
+    final: 95.16666666666667,
+  }, precisionJudges);
+  const textExport = rankingResultsExportText(rankDivisionView([noisyPrecision], "Open", "overall"), precisionRoster, "overall", true);
+  assert.match(textExport, /Rank\s+\|\s+Competitor/);
+  assert.match(textExport, /95\.17/);
+  assert.match(textExport, /37\.4/);
+  assert.match(textExport, /36(?=\s*\|)/);
+  assert.doesNotMatch(textExport, /36\.00000000000001|37\.400000000000006|95\.16666666666667/);
+  assert.match(textExport, /\r\n[-+|]+\r\n/);
 });
 
 test("compact technical notation keeps category codes out of feature metadata and marks deductions", () => {
@@ -219,4 +244,18 @@ test("competitor details keep every assigned judge together and preserve event/c
     { competitor: { ...target, name: "Lo, Graham" }, judgeRows: grouped.slice(0, 1) },
   ], true);
   assert.ok(commaName.startsWith('Competitor: "Lo, Graham"'), "competitor names with commas stay readable and quoted");
+
+  const textDetails = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], true, "txt");
+  assert.ok(textDetails.includes("Competitor | Competitor 1"));
+  assert.ok(textDetails.includes("Judge | Judge 1"));
+  assert.ok(textDetails.includes("# | Trick / deduction | Final"));
+  assert.ok(textDetails.includes("1 | #3DL2E-2 | 12.34"));
+  assert.ok(textDetails.includes("2 | Unintentional Drop | -0.3"));
+  assert.ok(textDetails.includes("3 | F3DL1E0 [T1 + A] | 56.78"));
+  assert.ok(textDetails.includes("Control | 1"));
+  assert.ok(textDetails.includes("Performance Total | 21"));
+  assert.doesNotMatch(textDetails, /Competitor,|Judge,|Control,|36\.00000000000001/);
+  const maskedTextDetails = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], false, "txt");
+  assert.ok(maskedTextDetails.includes("1 | #3DL2E-2 | ***"));
+  assert.doesNotMatch(maskedTextDetails, /12\.34|56\.78|68\.82/);
 });
