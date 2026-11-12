@@ -159,10 +159,10 @@ export function scoreDetailsExportContent(
     if (sectionIndex > 0 && lines.at(-1) !== separator) lines.push(separator);
     judgeRows.forEach(({ judge, submission }) => {
       const scoringLabel = judge.scoring_type === "technical" ? "Technical" : "Performance";
-      lines.push(row(["Competitor", competitor.name]));
-      lines.push(row(["Judge", `Judge ${judge.roster_order}`]));
-      lines.push(row(["Judge Category", scoringLabel]));
-      lines.push(row(["Submitted At", submittedAt(submission?.submitted_at)]));
+      lines.push(`Competitor: ${cell(competitor.name)}`);
+      lines.push(`Judge: ${cell(`Judge ${judge.roster_order}`)}`);
+      lines.push(`Judge Category: ${scoringLabel}`);
+      lines.push(`Submitted At: ${submittedAt(submission?.submitted_at)}`);
 
       if (judge.scoring_type === "technical") {
         lines.push("TECHNICAL SCORES");
@@ -180,11 +180,9 @@ export function scoreDetailsExportContent(
         lines.push(`Technical Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
       } else {
         lines.push("PERFORMANCE SCORES");
-        lines.push(row(["Category", "Score"]));
-        categories.forEach((category, index) => lines.push(row([
-          category,
-          submission ? point(submission.performance[index]) : "",
-        ])));
+        categories.forEach((category, index) => lines.push(
+          `${category}: ${submission ? point(submission.performance[index]) : ""}`,
+        ));
         const calculatedTotal = submission?.total ?? submission?.performance.reduce((sum, value) => sum + value, 0);
         lines.push(`Performance Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
       }

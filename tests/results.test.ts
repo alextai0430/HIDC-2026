@@ -158,21 +158,21 @@ test("competitor details keep every assigned judge together and preserve event/c
 
   const exported = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], true);
   const lines = exported.split("\r\n");
-  assert.equal(lines[0], "Competitor,Competitor 1");
-  assert.equal(lines[1], "Judge,Judge 1");
-  assert.equal(lines[2], "Judge Category,Technical");
-  assert.equal(lines[3], "Submitted At,2026-11-01T12:03:00.000Z");
+  assert.equal(lines[0], "Competitor: Competitor 1");
+  assert.equal(lines[1], "Judge: Judge 1");
+  assert.equal(lines[2], "Judge Category: Technical");
+  assert.equal(lines[3], "Submitted At: 2026-11-01T12:03:00.000Z");
   assert.ok(lines.includes("1, #3DL2E-2: 12.34"));
   assert.ok(lines.includes("2, Unintentional Drop: -0.3"));
   assert.ok(lines.includes("3, F3DL1E0 [T1 + A]: 56.78"));
   assert.ok(lines.includes("Technical Total: 68.82"));
-  assert.ok(lines.includes("Judge,Judge 2"));
-  assert.ok(lines.includes("Judge Category,Performance"));
-  assert.ok(lines.includes("Category,Score"));
-  assert.ok(lines.includes("Control,1"));
-  assert.ok(lines.includes("Showmanship,6"));
+  assert.ok(lines.includes("Judge: Judge 2"));
+  assert.ok(lines.includes("Judge Category: Performance"));
+  assert.ok(lines.includes("Control: 1"));
+  assert.ok(lines.includes("Showmanship: 6"));
+  assert.doesNotMatch(lines.filter((line) => /^(Control|Style|Space Usage|Choreography|Construction|Showmanship):/.test(line)).join("\n"), /,/);
   assert.ok(lines.includes("Performance Total: 21"));
-  assert.ok(lines.includes("Judge,Judge 3"));
+  assert.ok(lines.includes("Judge: Judge 3"));
   assert.ok(lines.includes("Technical Total: Not submitted"));
   assert.doesNotMatch(exported, /Historical Name Must Not Export|technical-1|performance-2|deleted-technical-3/);
   assert.doesNotMatch(exported, /2026-11-01T12:00:00Z|2026-11-01T12:01:00Z|2026-11-01T12:02:00Z/, "event timestamps are not exported");
@@ -180,7 +180,7 @@ test("competitor details keep every assigned judge together and preserve event/c
 
   const masked = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], false);
   assert.ok(masked.includes("1, #3DL2E-2: ***"));
-  assert.ok(masked.includes("Control,***"));
+  assert.ok(masked.includes("Control: ***"));
   assert.ok(masked.includes("Technical Total: ***"));
   assert.doesNotMatch(masked, /12\.34|68\.82|56\.78|Historical Name Must Not Export/);
 
@@ -211,12 +211,12 @@ test("competitor details keep every assigned judge together and preserve event/c
     { competitor: target, judgeRows: grouped.slice(0, 1) },
     { competitor: second, judgeRows: scoreDetailsForCompetitor(second.id, judges.slice(1, 2), []) },
   ], true);
-  assert.equal(multi.split("Competitor,").length - 1, 2, "each competitor starts a complete section");
+  assert.equal(multi.split("Competitor: ").length - 1, 2, "each competitor starts a complete section");
   assert.equal(multi.split("==================================================").length - 1, 2, "competitor sections have a clear separator");
-  assert.ok(multi.includes("Competitor,Competitor 2"));
+  assert.ok(multi.includes("Competitor: Competitor 2"));
 
   const commaName = scoreDetailsExportContent([
     { competitor: { ...target, name: "Lo, Graham" }, judgeRows: grouped.slice(0, 1) },
   ], true);
-  assert.ok(commaName.startsWith('Competitor,"Lo, Graham"'), "competitor names with commas stay in one field");
+  assert.ok(commaName.startsWith('Competitor: "Lo, Graham"'), "competitor names with commas stay readable and quoted");
 });
