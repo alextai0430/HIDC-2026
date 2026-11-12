@@ -61,11 +61,7 @@ import { download } from "@/lib/export";
 import TechnicalPointConfiguration from "@/app/components/technical-point-configuration";
 import AppearanceSettings, { type AppearanceSaveResult } from "@/app/components/appearance-settings";
 import { applyAppearance, AppearancePreferences, defaultAppearance, normalizeAppearancePreferences } from "@/lib/appearance";
-import {
-  detailSubmissions,
-  ownSubmissions,
-  personalScoreExportRows,
-} from "@/lib/scoped";
+import { detailSubmissions } from "@/lib/scoped";
 import {
   compactTechnicalNotation,
   divisionResultsJudges,
@@ -444,8 +440,6 @@ export default function Page() {
   );
   const visibleSubmissions =
     profile && state ? detailSubmissions(profile, state.submissions) : [];
-  const personalSubmissions =
-    profile && state ? ownSubmissions(profile, state.submissions) : [];
   const submissionPending = !!current && submittingCompetitors.has(current.id) && displayed?.user_id === profile?.id;
   const submissionSubmitted = !!displayed?.finished || submissionPending;
   const canScore =
@@ -1998,6 +1992,20 @@ export default function Page() {
           JUDGE CONSOLE <b>2026</b>
         </span>
       </nav>
+      {adminUnlocked && adminUnlockToken && tab !== "Admin" ? (
+        <div className="admin-session-bar" role="status">
+          <span>Admin unlocked · {showPoints ? "points visible" : "points hidden"}</span>
+          <button
+            type="button"
+            className={`admin-points-toggle ${showPoints ? "enabled" : ""}`}
+            role="switch"
+            aria-checked={showPoints}
+            onClick={() => void toggleShowPoints()}
+          >
+            {showPoints ? "Hide Points" : "Show Points"}
+          </button>
+        </div>
+      ) : null}
       {scoringReconciliationNotice ? (
         <div className="point-sync-reconciliation" role="status">
           <span>{scoringReconciliationNotice}</span>
@@ -3040,7 +3048,7 @@ export default function Page() {
               <div className="panel-heading">
                 <h3>Admin Access</h3>
               </div>
-              <p>Enter the admin password to view score values.</p>
+              <p>Unlock Admin to control score visibility across your authorized tabs.</p>
               <form onSubmit={verifyAdminPassword}>
                 <label>
                   Admin password
@@ -3063,11 +3071,11 @@ export default function Page() {
               </form>
             </section>
           ) : (
-          <section className="panel records">
+          <section className="panel admin-session-panel">
             <div className="panel-heading">
               <div>
                 <h3>Admin Access</h3>
-                <p className="muted admin-points-help">Unlock stays active as you move between tabs. It resets after reload.</p>
+                <p className="muted admin-points-help">Unlock stays active as you move between tabs and resets after reload.</p>
               </div>
               <button
                 onClick={lockAdmin}
@@ -3090,48 +3098,6 @@ export default function Page() {
                 {showPoints ? "Hide Points" : "Show Points"}
               </button>
             </div>
-            {canViewPoints && exports((format, ranked) => {
-              const ordered = [...personalSubmissions].sort((a, b) =>
-                ranked
-                  ? (b.total ?? 0) - (a.total ?? 0)
-                  : a.updated_at.localeCompare(b.updated_at),
-              );
-              download(
-                personalScoreExportRows(profile!, ordered, state.competitors, canViewPoints),
-                format,
-                "my-scores",
-              );
-            })}
-            {personalSubmissions.map((s) => (
-              <details className="submission-detail" key={s.id}>
-                <summary>
-                  <span>
-                    {
-                      state.competitors.find((c) => c.id === s.competitor_id)
-                        ?.name
-                    }
-                  </span>
-                  <span>
-                    {s.finished ? "Submitted" : "Draft"}
-                    {s.dq ? " · DQ" : ""}
-                  </span>
-                  <span>Total {canViewSubmissionPoints(s) && s.total !== undefined ? fmt(s.total) : "***"}</span>
-                </summary>
-                {s.scoring_type === "technical"
-                  ? s.events.map((e, i) => (
-                      <SubmissionEventDetail key={e.id} event={e} index={i} revealPoints={canViewPoints} />
-                    ))
-                  : categories.map((c, i) => (
-                      <div className="detail-event detail-event-category" key={c}>
-                        <b className="detail-event-title">{c}</b>
-                        <b className="detail-event-points">{canViewSubmissionPoints(s) ? (s.performance[i] ?? 0).toFixed(1) : "***"}</b>
-                      </div>
-                    ))}
-              </details>
-            ))}
-            {!personalSubmissions.length && (
-              <div className="empty-state">No scores yet.</div>
-            )}
           </section>
           )
         )}

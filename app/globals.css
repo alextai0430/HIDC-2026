@@ -266,6 +266,33 @@ nav button:hover:not(:disabled) {
   background: none;
   color: var(--text);
 }
+.admin-session-bar {
+  position: sticky;
+  top: calc(var(--header-height) + 59px);
+  z-index: 39;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-height: 42px;
+  padding: 6px 36px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: 11px;
+}
+.admin-session-bar .admin-points-toggle {
+  min-width: 100px;
+  padding: 6px 10px;
+  font-size: 11px;
+}
+.admin-session-panel {
+  width: min(620px, 100%);
+  margin: 40px auto;
+}
+.admin-session-panel .panel-heading {
+  border-bottom: 1px solid var(--border);
+}
 .nav-end {
   margin-left: auto;
   align-self: center;
@@ -1623,6 +1650,7 @@ select {
     gap: 20px;
     height: 54px;
   }
+  .admin-session-bar { top: calc(var(--header-height) + 54px); padding: 6px 16px; }
   nav button {
     font-size: 12px;
   }
