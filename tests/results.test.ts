@@ -136,6 +136,10 @@ test("ranking exports follow the selected division/view and never include judge 
     final: 95.16666666666667,
   }, precisionJudges);
   const textExport = rankingResultsExportText(rankDivisionView([noisyPrecision], "Open", "overall"), precisionRoster, "overall", true);
+  const csvRows = rankingResultsExportRows(rankDivisionView([noisyPrecision], "Open", "overall"), precisionRoster, "overall", true);
+  assert.equal(csvRows[0]["Weighted Final /100"], 95.17);
+  assert.equal(csvRows[0]["Average Technical raw"], 37.4);
+  assert.equal(csvRows[0]["Technical · Judge 2"], 36);
   assert.match(textExport, /Rank\s+\|\s+Competitor/);
   assert.match(textExport, /95\.17/);
   assert.match(textExport, /37\.4/);
@@ -243,7 +247,7 @@ test("competitor details keep every assigned judge together and preserve event/c
   const commaName = scoreDetailsExportContent([
     { competitor: { ...target, name: "Lo, Graham" }, judgeRows: grouped.slice(0, 1) },
   ], true);
-  assert.ok(commaName.startsWith('Competitor: "Lo, Graham"'), "competitor names with commas stay readable and quoted");
+  assert.ok(commaName.startsWith('"Competitor: Lo, Graham"'), "CSV quotes the full field only when the name contains a comma");
 
   const textDetails = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], true, "txt");
   assert.ok(textDetails.includes("Competitor | Competitor 1"));

@@ -91,19 +91,20 @@ export function resultsViewLabel(view: ResultsView, judges: ResultsJudge[]) {
 /** Export data mirrors the visible ranking table and deliberately omits judge identities. */
 export function rankingResultsExportRows(rows: ResultsRow[], judges: ResultsJudge[], view: ResultsView, revealPoints: boolean): Record<string, unknown>[] {
   if (!revealPoints) return [];
+  const rounded = (value: number | null) => value == null ? null : Number(value.toFixed(2));
   return rows.map((row) => ({
     Rank: row.viewRank ?? "Pending",
     Competitor: row.competitor.name,
     View: resultsViewLabel(view, judges),
-    "View score": row.viewScore,
+    "View score": rounded(row.viewScore),
     ...Object.fromEntries(judges.map((judge) => [
       `${judge.scoring_type === "technical" ? "Technical" : "Performance"} · Judge ${judge.roster_order}`,
-      scoreForAssignedJudge(row, judge),
+      rounded(scoreForAssignedJudge(row, judge)),
     ])),
-    "Average Technical raw": row.raw,
-    "Normalized Technical /70": row.scaled,
-    "Average Performance /30": row.average,
-    "Weighted Final /100": row.final,
+    "Average Technical raw": rounded(row.raw),
+    "Normalized Technical /70": rounded(row.scaled),
+    "Average Performance /30": rounded(row.average),
+    "Weighted Final /100": rounded(row.final),
     Status: row.dq ? "DQ" : row.complete ? "Complete" : "Pending",
   }));
 }
@@ -187,7 +188,7 @@ export function scoreDetailsExportContent(
     judgeRows.forEach(({ judge, submission }) => {
       const scoringLabel = judge.scoring_type === "technical" ? "Technical" : "Performance";
       const metadataRow = (label: string, value: string) => lines.push(
-        format === "txt" ? pipeRow([label, value]) : `${label}: ${cell(value)}`,
+        format === "txt" ? pipeRow([label, value]) : row([`${label}: ${value}`]),
       );
       metadataRow("Competitor", competitor.name);
       metadataRow("Judge", `Judge ${judge.roster_order}`);
