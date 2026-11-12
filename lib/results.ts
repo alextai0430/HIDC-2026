@@ -143,7 +143,8 @@ export function scoreDetailsExportContent(
     const numeric = typeof value === "number" && Number.isFinite(value);
     let text = value == null ? "" : String(value);
     if (!numeric && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
-    return `"${text.replaceAll('"', '""')}"`;
+    if (/[",\r\n]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
+    return text;
   };
   const row = (values: unknown[]) => values.map(cell).join(",");
   const point = (value: number | null | undefined) => revealPoints ? value ?? "—" : "***";

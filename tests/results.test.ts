@@ -165,31 +165,31 @@ test("competitor details keep every assigned judge together and preserve event/c
   };
   const exported = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], true, rules);
   const lines = exported.split("\r\n");
-  assert.equal(lines[0], '"Competitor","Competitor 1"');
-  assert.equal(lines[1], '"Judge","Judge 1"');
-  assert.equal(lines[2], '"Judge Category","Technical"');
-  assert.equal(lines[3], '"Submitted At","2026-11-01T12:03:00.000Z"');
-  assert.ok(lines.includes('"#","Identifier","Trick","Difficulty","Base","Features","Execution","Level","Final"'));
-  assert.ok(lines.includes('"1","3D#L2E-2","#","3D","10","—","E-2","L2","12.34"'));
-  assert.ok(lines.includes('"2","Deduction · Unintentional Drop","Unintentional Drop","—","-0.3","—","—","—","-0.3"'));
-  assert.ok(lines.includes('"3","2DTL4E0","T","2D","20","T1, A","E0","L4","56.78"'), "comma-containing feature values are quoted as one CSV field");
-  assert.ok(lines.includes('"Technical Total","","","","","","","","68.82"'));
-  assert.ok(lines.includes('"Judge","Judge 2"'));
-  assert.ok(lines.includes('"Judge Category","Performance"'));
-  assert.ok(lines.includes('"Category","Score"'));
-  assert.ok(lines.includes('"Control","1"'));
-  assert.ok(lines.includes('"Showmanship","6"'));
-  assert.ok(lines.includes('"Performance Total","21"'));
-  assert.ok(lines.includes('"Judge","Judge 3"'));
-  assert.ok(lines.includes('"Technical Total","","","","","","","","—"'));
+  assert.equal(lines[0], "Competitor,Competitor 1");
+  assert.equal(lines[1], "Judge,Judge 1");
+  assert.equal(lines[2], "Judge Category,Technical");
+  assert.equal(lines[3], "Submitted At,2026-11-01T12:03:00.000Z");
+  assert.ok(lines.includes("#,Identifier,Trick,Difficulty,Base,Features,Execution,Level,Final"));
+  assert.ok(lines.includes("1,3D#L2E-2,#,3D,10,—,E-2,L2,12.34"));
+  assert.ok(lines.includes("2,Deduction · Unintentional Drop,Unintentional Drop,—,-0.3,—,—,—,-0.3"));
+  assert.ok(lines.includes('3,2DTL4E0,T,2D,20,"T1, A",E0,L4,56.78'), "comma-containing feature values are quoted as one CSV field");
+  assert.ok(lines.includes("Technical Total,,,,,,,,68.82"));
+  assert.ok(lines.includes("Judge,Judge 2"));
+  assert.ok(lines.includes("Judge Category,Performance"));
+  assert.ok(lines.includes("Category,Score"));
+  assert.ok(lines.includes("Control,1"));
+  assert.ok(lines.includes("Showmanship,6"));
+  assert.ok(lines.includes("Performance Total,21"));
+  assert.ok(lines.includes("Judge,Judge 3"));
+  assert.ok(lines.includes("Technical Total,,,,,,,,—"));
   assert.doesNotMatch(exported, /Historical Name Must Not Export|technical-1|performance-2|deleted-technical-3/);
   assert.doesNotMatch(exported, /2026-11-01T12:00:00Z|2026-11-01T12:01:00Z|2026-11-01T12:02:00Z/, "event timestamps are not exported");
   assert.doesNotMatch(exported, /Normalized|Weighted Final/);
 
   const masked = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], false, rules);
-  assert.ok(masked.includes('"1","3D#L2E-2","#","3D","***","—","E-2","L2","***"'));
-  assert.ok(masked.includes('"Control","***"'));
-  assert.ok(masked.includes('"Technical Total","","","","","","","","***"'));
+  assert.ok(masked.includes("1,3D#L2E-2,#,3D,***,—,E-2,L2,***"));
+  assert.ok(masked.includes("Control,***"));
+  assert.ok(masked.includes("Technical Total,,,,,,,,***"));
   assert.doesNotMatch(masked, /12\.34|68\.82|56\.78|Historical Name Must Not Export/);
 
   const second = competitor("2", "Open", 8);
@@ -197,7 +197,12 @@ test("competitor details keep every assigned judge together and preserve event/c
     { competitor: target, judgeRows: grouped.slice(0, 1) },
     { competitor: second, judgeRows: scoreDetailsForCompetitor(second.id, judges.slice(1, 2), []) },
   ], true, rules);
-  assert.equal(multi.split('"Competitor",').length - 1, 2, "each competitor starts a complete section");
+  assert.equal(multi.split("Competitor,").length - 1, 2, "each competitor starts a complete section");
   assert.equal(multi.split("==================================================").length - 1, 2, "competitor sections have a clear separator");
-  assert.ok(multi.includes('"Competitor","Competitor 2"'));
+  assert.ok(multi.includes("Competitor,Competitor 2"));
+
+  const commaName = scoreDetailsExportContent([
+    { competitor: { ...target, name: "Lo, Graham" }, judgeRows: grouped.slice(0, 1) },
+  ], true, rules);
+  assert.ok(commaName.startsWith('Competitor,"Lo, Graham"'), "competitor names with commas stay in one field");
 });
