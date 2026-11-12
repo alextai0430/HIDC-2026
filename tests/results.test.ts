@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Competitor, Event, Ranking, ScoringRules, Submission } from "../lib/model";
+import type { Competitor, Event, Ranking, Submission } from "../lib/model";
 import {
   compactTechnicalNotation,
   divisionResultsJudges,
@@ -140,7 +140,7 @@ test("competitor details keep every assigned judge together and preserve event/c
     scoring_type: "technical", events: [
       { id: "event-1", trick: "# 3D", level: 2, features: [], execution: "E-2", at: "2026-11-01T12:00:00Z", value: 12.34 },
       { id: "event-2", trick: "Unintentional Drop", level: 1, features: [], at: "2026-11-01T12:01:00Z", value: -0.3 },
-      { id: "event-3", trick: "T 2D", level: 4, features: ["T1", "A"], execution: "E0", at: "2026-11-01T12:02:00Z", value: 56.78 },
+      { id: "event-3", trick: "F 3D", level: 1, features: ["T1", "A"], execution: "E0", at: "2026-11-01T12:02:00Z", value: 56.78 },
     ], performance: [], total: 68.82, finished: true, dq: false, version: 3,
     updated_at: "2026-11-01T12:03:00Z", submitted_at: "2026-11-01T12:03:00Z",
   };
@@ -156,23 +156,15 @@ test("competitor details keep every assigned judge together and preserve event/c
   assert.equal(grouped[1].submission?.id, performance.id, "historical attribution matches deleted profiles");
   assert.equal(grouped[2].submission, null, "unsubmitted assigned judges still appear");
 
-  const rules: ScoringRules = {
-    bases: { "#": { "3D": 10 }, T: { "2D": 20 } },
-    deductions: { "Unintentional Drop": -0.3 },
-    levels: { "1": 1, "2": 2, "4": 4 },
-    features: { T1: 1.2, A: 1.7 },
-    executions: { E0: 1, "E-1": 0.9, "E-2": 0.8, "E-3": 0.7 },
-  };
-  const exported = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], true, rules);
+  const exported = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], true);
   const lines = exported.split("\r\n");
   assert.equal(lines[0], "Competitor,Competitor 1");
   assert.equal(lines[1], "Judge,Judge 1");
   assert.equal(lines[2], "Judge Category,Technical");
   assert.equal(lines[3], "Submitted At,2026-11-01T12:03:00.000Z");
-  assert.ok(lines.includes("#,Trick,Difficulty,Base,Features,Execution,Level,Final"));
-  assert.ok(lines.includes("1,#,3D,10,,E-2,L2,12.34"));
-  assert.ok(lines.includes("2,Unintentional Drop,,-0.3,,,,-0.3"));
-  assert.ok(lines.includes('3,T,2D,20,"T1, A",E0,L4,56.78'), "comma-containing feature values are quoted as one CSV field");
+  assert.ok(lines.includes("1, #3DL2E-2: 12.34"));
+  assert.ok(lines.includes("2, Unintentional Drop: -0.3"));
+  assert.ok(lines.includes("3, F3DL1E0 [T1 + A]: 56.78"));
   assert.ok(lines.includes("Technical Total: 68.82"));
   assert.ok(lines.includes("Judge,Judge 2"));
   assert.ok(lines.includes("Judge Category,Performance"));
@@ -186,8 +178,8 @@ test("competitor details keep every assigned judge together and preserve event/c
   assert.doesNotMatch(exported, /2026-11-01T12:00:00Z|2026-11-01T12:01:00Z|2026-11-01T12:02:00Z/, "event timestamps are not exported");
   assert.doesNotMatch(exported, /Normalized|Weighted Final/);
 
-  const masked = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], false, rules);
-  assert.ok(masked.includes("1,#,3D,***,,E-2,L2,***"));
+  const masked = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], false);
+  assert.ok(masked.includes("1, #3DL2E-2: ***"));
   assert.ok(masked.includes("Control,***"));
   assert.ok(masked.includes("Technical Total: ***"));
   assert.doesNotMatch(masked, /12\.34|68\.82|56\.78|Historical Name Must Not Export/);
@@ -201,10 +193,9 @@ test("competitor details keep every assigned judge together and preserve event/c
         events: technical.events.map((event) => ({ ...event, features: [] })),
       },
     }],
-  }], true, rules);
-  assert.ok(noFeatures.includes("#,Trick,Difficulty,Base,Execution,Level,Final"));
-  assert.ok(noFeatures.includes("1,#,3D,10,E-2,L2,12.34"));
-  assert.doesNotMatch(noFeatures, /—|Identifier|3D#L2E-2/);
+  }], true);
+  assert.ok(noFeatures.includes("1, #3DL2E-2: 12.34"));
+  assert.doesNotMatch(noFeatures, /—|Identifier|Base|3D#L2E-2/);
   assert.ok(noFeatures.includes("Technical Total: 68.82"));
   const roundedTotal = scoreDetailsExportContent([{
     competitor: target,
@@ -212,20 +203,20 @@ test("competitor details keep every assigned judge together and preserve event/c
       ...grouped[0],
       submission: { ...technical, total: 36.00000000000001 },
     }],
-  }], true, rules);
+  }], true);
   assert.ok(roundedTotal.includes("Technical Total: 36"));
 
   const second = competitor("2", "Open", 8);
   const multi = scoreDetailsExportContent([
     { competitor: target, judgeRows: grouped.slice(0, 1) },
     { competitor: second, judgeRows: scoreDetailsForCompetitor(second.id, judges.slice(1, 2), []) },
-  ], true, rules);
+  ], true);
   assert.equal(multi.split("Competitor,").length - 1, 2, "each competitor starts a complete section");
   assert.equal(multi.split("==================================================").length - 1, 2, "competitor sections have a clear separator");
   assert.ok(multi.includes("Competitor,Competitor 2"));
 
   const commaName = scoreDetailsExportContent([
     { competitor: { ...target, name: "Lo, Graham" }, judgeRows: grouped.slice(0, 1) },
-  ], true, rules);
+  ], true);
   assert.ok(commaName.startsWith('Competitor,"Lo, Graham"'), "competitor names with commas stay in one field");
 });

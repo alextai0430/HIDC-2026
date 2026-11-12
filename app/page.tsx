@@ -522,7 +522,7 @@ export default function Page() {
         visibleSubmissions,
       ),
     }));
-    download(scoreDetailsExportContent(sections, canViewPoints, state?.scoringRules), format, name);
+    download(scoreDetailsExportContent(sections, canViewPoints), format, name);
   };
   const syncStatus = demo
     ? "Score saved locally · demo"

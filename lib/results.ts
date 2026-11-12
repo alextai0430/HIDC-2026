@@ -135,7 +135,6 @@ export type ScoreDetailsExportSection = {
 export function scoreDetailsExportContent(
   sections: ScoreDetailsExportSection[],
   revealPoints: boolean,
-  rules?: ScoringRules,
 ) {
   const lines: string[] = [];
   const separator = "==================================================";
@@ -168,28 +167,14 @@ export function scoreDetailsExportContent(
       if (judge.scoring_type === "technical") {
         lines.push("TECHNICAL SCORES");
         const events = submission?.events ?? [];
-        const hasFeatures = events.some((event) => !deductions.includes(event.trick) && event.features.length > 0);
-        lines.push(row([
-          "#", "Trick", "Difficulty", "Base",
-          ...(hasFeatures ? ["Features"] : []),
-          "Execution", "Level", "Final",
-        ]));
         events.forEach((event, index) => {
           const isDeduction = deductions.includes(event.trick);
           const [trickType, difficulty] = event.trick.split(" ");
-          const baseValue = isDeduction
-            ? rules?.deductions[event.trick] ?? event.value
-            : rules?.bases[trickType]?.[difficulty];
-          lines.push(row([
-            index + 1,
-            isDeduction ? event.trick : trickType,
-            isDeduction ? "" : difficulty ?? "",
-            point(baseValue),
-            ...(hasFeatures ? [isDeduction ? "" : event.features.join(", ")] : []),
-            isDeduction ? "" : event.execution ?? "E0",
-            isDeduction ? "" : `L${event.level}`,
-            point(event.value),
-          ]));
+          const label = isDeduction
+            ? `${event.trick}: ${point(event.value)}`
+            : `${trickType}${difficulty ?? ""}L${event.level}${event.execution ?? "E0"}` +
+              `${event.features.length ? ` [${event.features.join(" + ")}]` : ""}: ${point(event.value)}`;
+          lines.push(row([index + 1, ` ${label}`]));
         });
         const calculatedTotal = submission?.total ?? submission?.events.reduce((sum, event) => sum + (event.value ?? 0), 0);
         lines.push(`Technical Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
