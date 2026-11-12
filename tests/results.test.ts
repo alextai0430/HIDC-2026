@@ -169,28 +169,51 @@ test("competitor details keep every assigned judge together and preserve event/c
   assert.equal(lines[1], "Judge,Judge 1");
   assert.equal(lines[2], "Judge Category,Technical");
   assert.equal(lines[3], "Submitted At,2026-11-01T12:03:00.000Z");
-  assert.ok(lines.includes("#,Identifier,Trick,Difficulty,Base,Features,Execution,Level,Final"));
-  assert.ok(lines.includes("1,3D#L2E-2,#,3D,10,—,E-2,L2,12.34"));
-  assert.ok(lines.includes("2,Deduction · Unintentional Drop,Unintentional Drop,—,-0.3,—,—,—,-0.3"));
-  assert.ok(lines.includes('3,2DTL4E0,T,2D,20,"T1, A",E0,L4,56.78'), "comma-containing feature values are quoted as one CSV field");
-  assert.ok(lines.includes("Technical Total,,,,,,,,68.82"));
+  assert.ok(lines.includes("#,Trick,Difficulty,Base,Features,Execution,Level,Final"));
+  assert.ok(lines.includes("1,#,3D,10,,E-2,L2,12.34"));
+  assert.ok(lines.includes("2,Unintentional Drop,,-0.3,,,,-0.3"));
+  assert.ok(lines.includes('3,T,2D,20,"T1, A",E0,L4,56.78'), "comma-containing feature values are quoted as one CSV field");
+  assert.ok(lines.includes("Technical Total: 68.82"));
   assert.ok(lines.includes("Judge,Judge 2"));
   assert.ok(lines.includes("Judge Category,Performance"));
   assert.ok(lines.includes("Category,Score"));
   assert.ok(lines.includes("Control,1"));
   assert.ok(lines.includes("Showmanship,6"));
-  assert.ok(lines.includes("Performance Total,21"));
+  assert.ok(lines.includes("Performance Total: 21"));
   assert.ok(lines.includes("Judge,Judge 3"));
-  assert.ok(lines.includes("Technical Total,,,,,,,,—"));
+  assert.ok(lines.includes("Technical Total: Not submitted"));
   assert.doesNotMatch(exported, /Historical Name Must Not Export|technical-1|performance-2|deleted-technical-3/);
   assert.doesNotMatch(exported, /2026-11-01T12:00:00Z|2026-11-01T12:01:00Z|2026-11-01T12:02:00Z/, "event timestamps are not exported");
   assert.doesNotMatch(exported, /Normalized|Weighted Final/);
 
   const masked = scoreDetailsExportContent([{ competitor: target, judgeRows: grouped }], false, rules);
-  assert.ok(masked.includes("1,3D#L2E-2,#,3D,***,—,E-2,L2,***"));
+  assert.ok(masked.includes("1,#,3D,***,,E-2,L2,***"));
   assert.ok(masked.includes("Control,***"));
-  assert.ok(masked.includes("Technical Total,,,,,,,,***"));
+  assert.ok(masked.includes("Technical Total: ***"));
   assert.doesNotMatch(masked, /12\.34|68\.82|56\.78|Historical Name Must Not Export/);
+
+  const noFeatures = scoreDetailsExportContent([{
+    competitor: target,
+    judgeRows: [{
+      ...grouped[0],
+      submission: {
+        ...technical,
+        events: technical.events.map((event) => ({ ...event, features: [] })),
+      },
+    }],
+  }], true, rules);
+  assert.ok(noFeatures.includes("#,Trick,Difficulty,Base,Execution,Level,Final"));
+  assert.ok(noFeatures.includes("1,#,3D,10,E-2,L2,12.34"));
+  assert.doesNotMatch(noFeatures, /—|Identifier|3D#L2E-2/);
+  assert.ok(noFeatures.includes("Technical Total: 68.82"));
+  const roundedTotal = scoreDetailsExportContent([{
+    competitor: target,
+    judgeRows: [{
+      ...grouped[0],
+      submission: { ...technical, total: 36.00000000000001 },
+    }],
+  }], true, rules);
+  assert.ok(roundedTotal.includes("Technical Total: 36"));
 
   const second = competitor("2", "Open", 8);
   const multi = scoreDetailsExportContent([

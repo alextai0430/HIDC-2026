@@ -147,9 +147,11 @@ export function scoreDetailsExportContent(
     return text;
   };
   const row = (values: unknown[]) => values.map(cell).join(",");
-  const point = (value: number | null | undefined) => revealPoints ? value ?? "—" : "***";
+  const point = (value: number | null | undefined) => revealPoints
+    ? value == null ? "" : Number(value.toFixed(2))
+    : "***";
   const submittedAt = (value?: string | null) => {
-    if (!value) return "—";
+    if (!value) return "";
     const parsed = Date.parse(value);
     return Number.isNaN(parsed) ? value : new Date(parsed).toISOString();
   };
@@ -165,8 +167,13 @@ export function scoreDetailsExportContent(
 
       if (judge.scoring_type === "technical") {
         lines.push("TECHNICAL SCORES");
-        lines.push(row(["#", "Identifier", "Trick", "Difficulty", "Base", "Features", "Execution", "Level", "Final"]));
         const events = submission?.events ?? [];
+        const hasFeatures = events.some((event) => !deductions.includes(event.trick) && event.features.length > 0);
+        lines.push(row([
+          "#", "Trick", "Difficulty", "Base",
+          ...(hasFeatures ? ["Features"] : []),
+          "Execution", "Level", "Final",
+        ]));
         events.forEach((event, index) => {
           const isDeduction = deductions.includes(event.trick);
           const [trickType, difficulty] = event.trick.split(" ");
@@ -175,27 +182,26 @@ export function scoreDetailsExportContent(
             : rules?.bases[trickType]?.[difficulty];
           lines.push(row([
             index + 1,
-            compactTechnicalNotation(event),
             isDeduction ? event.trick : trickType,
-            isDeduction ? "—" : difficulty ?? "—",
+            isDeduction ? "" : difficulty ?? "",
             point(baseValue),
-            isDeduction ? "—" : event.features.length ? event.features.join(", ") : "—",
-            isDeduction ? "—" : event.execution ?? "E0",
-            isDeduction ? "—" : `L${event.level}`,
+            ...(hasFeatures ? [isDeduction ? "" : event.features.join(", ")] : []),
+            isDeduction ? "" : event.execution ?? "E0",
+            isDeduction ? "" : `L${event.level}`,
             point(event.value),
           ]));
         });
         const calculatedTotal = submission?.total ?? submission?.events.reduce((sum, event) => sum + (event.value ?? 0), 0);
-        lines.push(row(["Technical Total", "", "", "", "", "", "", "", submission ? point(calculatedTotal) : "—"]));
+        lines.push(`Technical Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
       } else {
         lines.push("PERFORMANCE SCORES");
         lines.push(row(["Category", "Score"]));
         categories.forEach((category, index) => lines.push(row([
           category,
-          submission ? point(submission.performance[index]) : "—",
+          submission ? point(submission.performance[index]) : "",
         ])));
         const calculatedTotal = submission?.total ?? submission?.performance.reduce((sum, value) => sum + value, 0);
-        lines.push(row(["Performance Total", submission ? point(calculatedTotal) : "—"]));
+        lines.push(`Performance Total: ${submission ? point(calculatedTotal) : "Not submitted"}`);
       }
       lines.push(separator);
     });
