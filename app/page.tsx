@@ -61,7 +61,7 @@ import { download } from "@/lib/export";
 import TechnicalPointConfiguration from "@/app/components/technical-point-configuration";
 import AppearanceSettings, { type AppearanceSaveResult } from "@/app/components/appearance-settings";
 import { applyAppearance, AppearancePreferences, defaultAppearance, normalizeAppearancePreferences } from "@/lib/appearance";
-import { detailSubmissions } from "@/lib/scoped";
+import { canViewOwnPerformancePoints, detailSubmissions } from "@/lib/scoped";
 import {
   compactTechnicalNotation,
   divisionResultsJudges,
@@ -386,14 +386,9 @@ export default function Page() {
   const canViewPoints =
     adminUnlocked && showPoints && !!adminUnlockToken && state?.pointAccess === true;
   const canViewSubmissionPoints = (submission?: Submission) =>
-    !!submission && canViewPoints;
+    !!submission && (canViewPoints || (!!profile && canViewOwnPerformancePoints(profile, submission)));
   const canViewLivePerformancePoints = (submission?: Submission) =>
-    !!submission && (
-      canViewPoints ||
-      (profile?.role === "performance_judge" &&
-        submission.scoring_type === "performance" &&
-        submission.user_id === profile.id)
-    );
+    !!submission && (canViewPoints || (!!profile && canViewOwnPerformancePoints(profile, submission)));
   const active = state?.competitors.find(
     (c) => c.status === "active" && !c.archived,
   );
@@ -453,6 +448,8 @@ export default function Page() {
     !current.archived &&
     current.status === "active" &&
     !submissionSubmitted;
+  const canViewCurrentPerformancePoints = canViewLivePerformancePoints(displayed) ||
+    (tab === "Performance" && profile?.role === "performance_judge" && canScore);
   const allDivisions = Array.from(new Set([
     ...(state ? state.divisions ?? [] : divisions),
     ...(state?.competitors.map((c) => c.division) ?? []),
@@ -1994,7 +1991,13 @@ export default function Page() {
       </nav>
       {adminUnlocked && adminUnlockToken && tab !== "Admin" ? (
         <div className="admin-session-bar" role="status">
-          <span>Admin unlocked · {showPoints ? "points visible" : "points hidden"}</span>
+          <span>
+            Admin unlocked · {showPoints
+              ? "permitted points visible"
+              : profile?.role === "performance_judge"
+                ? "your Performance points visible · other scores hidden"
+                : "score values hidden"}
+          </span>
           <button
             type="button"
             className={`admin-points-toggle ${showPoints ? "enabled" : ""}`}
@@ -2588,7 +2591,7 @@ export default function Page() {
                           <h3>{category}</h3>
                         </div>
                         <strong>
-                          {canViewLivePerformancePoints(displayed)
+                          {canViewCurrentPerformancePoints
                             ? (displayed?.performance[i] ?? 0).toFixed(1)
                             : "***"}
                         </strong>
@@ -2624,7 +2627,7 @@ export default function Page() {
                 <aside className="panel performance-summary">
                   <h2>Performance</h2>
                   <div className="big-total">
-                    {canViewLivePerformancePoints(displayed)
+                    {canViewCurrentPerformancePoints
                       ? (displayed?.performance.reduce((a, b) => a + b, 0) ?? 0).toFixed(1)
                       : "***"}
                     <span>/ 30</span>
@@ -2632,7 +2635,7 @@ export default function Page() {
                   {categories.map((c, i) => (
                     <div className="summary-row" key={c}>
                       <span>{c}</span>
-                      <b>{canViewLivePerformancePoints(displayed) ? (displayed?.performance[i] ?? 0).toFixed(1) : "***"}</b>
+                      <b>{canViewCurrentPerformancePoints ? (displayed?.performance[i] ?? 0).toFixed(1) : "***"}</b>
                     </div>
                   ))}
                 </aside>
@@ -3086,7 +3089,11 @@ export default function Page() {
             <div className="admin-points-toggle-row">
               <div>
                 <b>Show Points</b>
-                <span className="muted">{showPoints ? "Your permitted score data is visible across this session." : "Point values and totals stay masked until enabled."}</span>
+                <span className="muted">{showPoints
+                  ? "Your permitted score data is visible across this session."
+                  : profile?.role === "performance_judge"
+                    ? "Your Performance scores stay visible; other point values stay masked."
+                    : "Point values and totals stay masked until enabled."}</span>
               </div>
               <button
                 type="button"
